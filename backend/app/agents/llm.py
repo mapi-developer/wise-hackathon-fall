@@ -34,6 +34,8 @@ GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS",
 # Local: LM Studio's server by default, reached from the containers through the host.
 LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1").rstrip("/")
 LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen3-4b-instruct-2507")
+# The chat agent needs reliable tool calling, which vision models often lack: it can use its own model.
+LOCAL_LLM_CHAT_MODEL = os.getenv("LOCAL_LLM_CHAT_MODEL") or LOCAL_LLM_MODEL
 LOCAL_TIMEOUT = httpx.Timeout(float(os.getenv("LOCAL_LLM_TIMEOUT_S", "300")), connect=5)
 
 _anthropic: Optional[AsyncAnthropic] = None
@@ -153,12 +155,12 @@ async def local_complete(messages: list[dict], **params: Any) -> dict:
     return r.json()["choices"][0]
 
 
-async def local_stream(messages: list[dict], **params: Any) -> AsyncIterator[dict]:
+async def local_stream(messages: list[dict], model: Optional[str] = None, **params: Any) -> AsyncIterator[dict]:
     """Streamed chat completion; yields each chunk's choices[0]."""
     async with httpx.AsyncClient(timeout=LOCAL_TIMEOUT) as http:
         try:
             async with http.stream("POST", f"{LOCAL_LLM_URL}/chat/completions", headers=_local_headers(),
-                                   json={"model": LOCAL_LLM_MODEL, "messages": messages, "stream": True, **params}) as r:
+                                   json={"model": model or LOCAL_LLM_MODEL, "messages": messages, "stream": True, **params}) as r:
                 if r.status_code != 200:
                     await r.aread()
                     raise _local_error(r)

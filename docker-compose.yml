@@ -71,6 +71,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LOCAL_LLM_URL: ${LOCAL_LLM_URL:-http://host.docker.internal:1234/v1}
       LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen3-4b-instruct-2507}
+      LOCAL_LLM_CHAT_MODEL: ${LOCAL_LLM_CHAT_MODEL:-}
       LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5-5}
       AGENT_EFFORT: ${AGENT_EFFORT:-high}

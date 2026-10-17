@@ -125,6 +125,21 @@ class PrefillInput(In):
     form_key: str = Field(description="key of a form listed in get_journey's automation")
 
 
+class TodoInput(In):
+    title: str = Field(min_length=1, max_length=200, description="What to do, short, e.g. 'Book an apartment viewing'")
+    due_date: Optional[str] = Field(default=None, description="Due date, YYYY-MM-DD, or null if none")
+
+    @field_validator("due_date")
+    @classmethod
+    def _due(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        r = rules.normalize_date(v)
+        if not r.iso:
+            raise ValueError(f"due_date must be YYYY-MM-DD ({r.issue})")
+        return r.iso
+
+
 class NoInput(In):
     pass
 
@@ -457,6 +472,13 @@ async def update_my_profile(session, user: User, inp: ProfileInput, ctx: Context
     return {"status": "saved", "updated": sorted(changed)}
 
 
+async def add_todo(session, user: User, inp: TodoInput, ctx: Context):
+    t = Task(user_id=user.id, title=inp.title.strip(), due_date=date.fromisoformat(inp.due_date) if inp.due_date else None, source="agent")
+    session.add(t)
+    await session.commit()
+    return {"status": "saved", "todo": t.title, "due": inp.due_date}
+
+
 # ------------------------------------------------------------ registry
 
 Handler = Callable[[AsyncSession, User, Any, Context], Awaitable[dict]]
@@ -516,6 +538,10 @@ TOOLS: dict[str, tuple[type[In], Handler, str, str, tuple[str, ...]]] = {
     "update_my_profile": (ProfileInput, update_my_profile,
         "Save details the user told you about themselves (citizenship, address, status, studies or occupation).",
         "Saving to your profile", ("profile",)),
+    "add_todo": (TodoInput, add_todo,
+        "Add an item to the user's personal to-do list (anything they want to remember, e.g. 'book an apartment viewing'), "
+        "with an optional due date. Journey steps are created by create_journey, not with this.",
+        "Adding to your to-do list", ("tasks",)),
 }
 
 

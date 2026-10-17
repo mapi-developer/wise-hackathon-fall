@@ -378,6 +378,7 @@ export function JourneyDetailPage() {
                 <li key={c.id}>
                   <Link to={`/app?chat=${c.id}`} className="block truncate rounded-lg px-2 py-1.5 text-sm hover:bg-blush">
                     {c.title}
+                    {c.createdHere && <span className="ml-1.5 text-xs text-muted">· {t('jd.plannedHere')}</span>}
                   </Link>
                 </li>
               ))}

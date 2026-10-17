@@ -2,14 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowRight, Check, ChevronDown, CircleAlert, History, Loader2, Plus, Square, Trash2 } from 'lucide-react'
+import { ArrowRight, Check, ChevronDown, CircleAlert, ExternalLink, FileText, History, Loader2, Map as MapIcon, Plus, Route, Square, Trash2 } from 'lucide-react'
 import { LogoMark } from '@/components/brand/Logo'
-import { Card } from '@/components/ui/primitives'
+import { Card, Progress } from '@/components/ui/primitives'
 import { useI18n } from '@/i18n'
 import * as api from '@/lib/api'
 import { suggestedQuestions } from '@/lib/mock-data'
 import { cn, timeAgo, uid } from '@/lib/format'
-import type { ChatMessage, ChatSessionInfo, ChatStep } from '@/lib/types'
+import { statusMeta } from '@/components/case/journey-meta'
+import type { ChatMessage, ChatRef, ChatSessionInfo, ChatStep, JourneySummary } from '@/lib/types'
 import { usePersistentState } from '@/store/persist'
 import { useAuth, useCase, useToast } from '@/store/context'
 
@@ -77,13 +78,174 @@ function Steps({ steps }: { steps: ChatStep[] }) {
   )
 }
 
+/** Cards for the journeys and forms the assistant created or opened in this reply. */
+function RefCards({
+  steps,
+  journeys,
+  current,
+  busy,
+  onSwitch,
+}: {
+  steps: ChatStep[]
+  journeys: JourneySummary[]
+  current?: string
+  busy: boolean
+  onSwitch: (id: string) => void
+}) {
+  const { t } = useI18n()
+  const seen = new Set<string>()
+  const refs = steps.flatMap((s) => s.refs ?? []).filter((r: ChatRef) => !seen.has(`${r.kind}:${r.id}`) && !!seen.add(`${r.kind}:${r.id}`))
+  if (!refs.length) return null
+  return (
+    <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+      {refs.map((r) => {
+        if (r.kind === 'form')
+          return (
+            <li key={`form:${r.id}`}>
+              <Link to={`/app/forms/${r.id}`} className="flex items-center gap-3 rounded-xl border border-rose-200 bg-white px-3.5 py-3 hover:border-brick-600">
+                <FileText className="size-5 shrink-0 text-brick-600" aria-hidden />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{r.title}</span>
+                  <span className="text-xs text-muted">{t('chat.card.openForm')}</span>
+                </span>
+              </Link>
+            </li>
+          )
+        // Live data when the journey is loaded (it may have been renamed or progressed since).
+        const j = journeys.find((x) => x.id === r.id)
+        if (!j) return null // deleted since
+        const pct = j.progress.total ? (j.progress.done / j.progress.total) * 100 : 0
+        const isCurrent = j.id === current
+        return (
+          <li key={`journey:${r.id}`} className={cn('rounded-xl border bg-white px-3.5 py-3', isCurrent ? 'border-forest-950' : 'border-rose-200')}>
+            <div className="flex items-start gap-2">
+              <Route className="mt-0.5 size-4 shrink-0 text-brick-600" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold">{j.title}</p>
+                <p className="truncate text-xs text-muted">
+                  {t(statusMeta[j.status].label)} · {t('journeys.stepsDone', { done: j.progress.done, total: j.progress.total })}
+                </p>
+              </div>
+            </div>
+            <Progress value={pct} className="mt-2" label={t('journeys.progressOf', { title: j.title })} />
+            <div className="mt-2.5 flex items-center gap-3 text-[13px] font-semibold">
+              <Link to={`/app/journeys/${j.id}`} className="text-brick-700 underline underline-offset-2">
+                {t('chat.card.openPlan')}
+              </Link>
+              {isCurrent ? (
+                <span className="flex items-center gap-1 text-xs font-medium text-muted">
+                  <Check className="size-3.5 text-ok-700" aria-hidden /> {t('chat.card.current')}
+                </span>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => onSwitch(j.id)} className="underline underline-offset-2 disabled:opacity-50">
+                  {t('chat.card.workOnThis')}
+                </button>
+              )}
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/** Which journey the conversation works on; the assistant can switch it too (switch_journey). */
+function JourneySwitcher({
+  journeys,
+  value,
+  disabled,
+  onPick,
+  onNew,
+}: {
+  journeys: JourneySummary[]
+  value?: JourneySummary
+  disabled: boolean
+  onPick: (id: string | null) => void
+  onNew: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const { t } = useI18n()
+  const wrap = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => wrap.current && !wrap.current.contains(e.target as Node) && setOpen(false)
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+  const pick = (id: string | null) => {
+    setOpen(false)
+    if (id !== (value?.id ?? null)) onPick(id)
+  }
+  const listed = journeys.filter((j) => j.status !== 'archived' || j.id === value?.id)
+  return (
+    <div ref={wrap} className="relative flex min-w-0 items-center gap-1">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        disabled={disabled}
+        aria-expanded={open}
+        aria-label={t('chat.journey.label')}
+        className={cn(
+          'flex min-w-0 items-center gap-1 truncate text-left text-[13px] disabled:opacity-60',
+          value ? 'font-semibold text-brick-700' : 'text-muted hover:text-forest-950',
+        )}
+      >
+        <span className="truncate">{value ? t('chat.about', { title: value.title }) : t('chat.journey.none')}</span>
+        <ChevronDown className="size-3.5 shrink-0" aria-hidden />
+      </button>
+      {value && (
+        <Link to={`/app/journeys/${value.id}`} aria-label={t('chat.journey.open')} className="shrink-0 text-muted hover:text-brick-700">
+          <ExternalLink className="size-3.5" />
+        </Link>
+      )}
+      {open && (
+        <ul className="animate-pop-in absolute top-[calc(100%+6px)] left-0 z-30 max-h-80 w-72 overflow-y-auto rounded-2xl border border-rose-200 bg-white py-1.5 shadow-[0_24px_60px_-20px_rgb(3_16_10/0.35)]">
+          {listed.map((j) => (
+            <li key={j.id}>
+              <button type="button" onClick={() => pick(j.id)} className={cn('flex w-full items-center gap-2 px-4 py-2 text-left hover:bg-blush', j.id === value?.id && 'bg-rose-100')}>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">{j.title}</span>
+                  <span className="text-xs text-muted">
+                    {t(statusMeta[j.status].label)} · {t('journeys.stepsDone', { done: j.progress.done, total: j.progress.total })}
+                  </span>
+                </span>
+                {j.id === value?.id && <Check className="size-4 shrink-0 text-ok-700" aria-hidden />}
+              </button>
+            </li>
+          ))}
+          <li className={cn(listed.length > 0 && 'mt-1 border-t border-rose-200 pt-1')}>
+            <button type="button" onClick={() => pick(null)} className={cn('flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-blush', !value && 'bg-rose-100')}>
+              <span className="flex-1">{t('chat.journey.general')}</span>
+              {!value && <Check className="size-4 shrink-0 text-ok-700" aria-hidden />}
+            </button>
+          </li>
+          <li>
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onNew()
+              }}
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-semibold text-brick-700 hover:bg-blush"
+            >
+              <Plus className="size-4" aria-hidden /> {t('chat.journey.new')}
+            </button>
+          </li>
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function History_({
   sessions,
+  journeyTitles,
   current,
   onPick,
   onDelete,
 }: {
   sessions: ChatSessionInfo[]
+  journeyTitles: Record<string, string>
   current: string | null
   onPick: (id: string) => void
   onDelete: (id: string) => void
@@ -122,7 +284,10 @@ function History_({
                 className={cn('min-w-0 flex-1 px-4 py-2 text-left hover:bg-blush', s.id === current && 'bg-rose-100')}
               >
                 <span className="block truncate text-sm font-medium">{s.title}</span>
-                <span className="text-xs text-muted">{timeAgo(s.updatedAt)}</span>
+                <span className="block truncate text-xs text-muted">
+                  {s.journeyId && journeyTitles[s.journeyId] && `${journeyTitles[s.journeyId]} · `}
+                  {timeAgo(s.updatedAt)}
+                </span>
               </button>
               <button
                 type="button"
@@ -149,7 +314,15 @@ export function Chat({
   openChatId,
   initialPrompt,
   fresh = false,
-}: { journeyId?: string; openChatId?: string; initialPrompt?: string; fresh?: boolean } = {}) {
+  onJourneyChange,
+}: {
+  journeyId?: string
+  openChatId?: string
+  initialPrompt?: string
+  fresh?: boolean
+  /** Tells the page which journey the open conversation is about (it can change mid-conversation). */
+  onJourneyChange?: (journeyId?: string) => void
+} = {}) {
   const { user } = useAuth()
   const { refresh, journeys } = useCase()
   const { toast } = useToast()
@@ -186,7 +359,11 @@ export function Chat({
   const currentSession = sessions.find((s) => s.id === current)
   const chatJourneyId = current ? currentSession?.journeyId : boundJourney
   const chatJourney = journeys.find((j) => j.id === chatJourneyId)
+  useEffect(() => {
+    onJourneyChange?.(chatJourney?.id)
+  }, [chatJourney?.id, onJourneyChange])
   const scroller = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLTextAreaElement>(null)
   const abort = useRef<AbortController | null>(null)
 
   function openFromUrl(chatId?: string, journey?: string, startNew = false) {
@@ -247,8 +424,9 @@ export function Chat({
             updateLast((m) => {
               const steps = [...m.steps]
               const i = e.state === 'start' ? -1 : steps.findLastIndex((s) => s.name === e.name && s.state === 'start')
-              if (i >= 0) steps[i] = { name: e.name, label: e.label, state: e.state }
-              else steps.push({ name: e.name, label: e.label, state: e.state })
+              const step = { name: e.name, label: e.label, state: e.state, refs: e.refs }
+              if (i >= 0) steps[i] = step
+              else steps.push(step)
               return { ...m, steps }
             })
           else if (e.type === 'error') updateLast((m) => ({ ...m, error: e.message }))
@@ -270,6 +448,24 @@ export function Chat({
     }
   }
 
+  const switchJourney = async (journey: string | null) => {
+    if (!current) {
+      setBoundJourney(journey ?? undefined)
+      return
+    }
+    try {
+      const updated = await api.setChatJourney(current, journey)
+      setSessions((ss) => ss.map((s) => (s.id === updated.id ? updated : s)))
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t('chat.journey.switchFailed'), 'error')
+    }
+  }
+
+  const startNewJourney = () => {
+    setDraft(t('chat.journey.newPrompt'))
+    input.current?.focus()
+  }
+
   const today = new Date().toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
   return (
@@ -280,16 +476,17 @@ export function Chat({
         </span>
         <div className="min-w-0 flex-1">
           <p className="font-semibold">{t('chat.title')}</p>
-          {chatJourney ? (
-            <Link to={`/app/journeys/${chatJourney.id}`} className="block truncate text-[13px] font-semibold text-brick-700 underline underline-offset-2">
-              {t('chat.about', { title: chatJourney.title })}
-            </Link>
-          ) : (
-            <p className="truncate text-[13px] text-muted">{t('chat.subtitle')}</p>
-          )}
+          <JourneySwitcher journeys={journeys} value={chatJourney} disabled={busy} onPick={switchJourney} onNew={startNewJourney} />
         </div>
+        <Link
+          to="/app/explore?alternatives=any"
+          className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-semibold text-muted hover:bg-rose-100 hover:text-forest-950"
+        >
+          <MapIcon className="size-4" aria-hidden /> <span className="hidden sm:inline">{t('chat.whereCanIGo')}</span>
+        </Link>
         <History_
           sessions={sessions}
+          journeyTitles={Object.fromEntries(journeys.map((j) => [j.id, j.title]))}
           current={current}
           onPick={setCurrent}
           onDelete={async (id) => {
@@ -359,6 +556,7 @@ export function Chat({
                   ) : (
                     m.streaming && !m.steps.some((s) => s.state === 'start') && <p className="text-[13px] text-muted italic">{t('chat.thinking')}</p>
                   )}
+                  <RefCards steps={m.steps} journeys={journeys} current={chatJourney?.id} busy={busy} onSwitch={switchJourney} />
                   {m.error && (
                     <p role="alert" className="mt-2 flex items-start gap-2 text-sm text-brick-700">
                       <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden /> {m.error}
@@ -383,6 +581,7 @@ export function Chat({
             {t('chat.askLabel')}
           </label>
           <textarea
+            ref={input}
             id="ask"
             rows={1}
             value={draft}

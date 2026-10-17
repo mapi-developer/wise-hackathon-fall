@@ -46,6 +46,8 @@ MIGRATIONS = [
     "ALTER TABLE payments ADD COLUMN IF NOT EXISTS currency VARCHAR NOT NULL DEFAULT 'EUR'",
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS journey_id VARCHAR REFERENCES journeys(id)",
     "ALTER TABLE prefilled_forms ADD COLUMN IF NOT EXISTS journey_id VARCHAR REFERENCES journeys(id)",
+    "ALTER TABLE journeys ADD COLUMN IF NOT EXISTS chat_id VARCHAR",
+    "CREATE INDEX IF NOT EXISTS ix_journeys_chat_id ON journeys (chat_id)",
     # worker queue + pipeline
     "ALTER TABLE document_analyses ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE country_guidelines ADD COLUMN IF NOT EXISTS managed_by VARCHAR NOT NULL DEFAULT 'manual'",

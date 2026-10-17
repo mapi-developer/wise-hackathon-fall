@@ -91,3 +91,35 @@ def test_pick_guideline_prefers_exact_citizenship():
     assert pick_guideline(rows, "HU", "KZ", "tourism").entry_type == "evisa"
     assert pick_guideline(rows, "HU", "RU", "tourism").origin_code == "*"
     assert pick_guideline(rows, "HU", "KZ", "study") is None
+
+
+def _row(code, status, basis="indicative", has_guideline=False, stay=None):
+    return {"code": code, "status": status, "basis": basis, "stay_days": stay, "has_guideline": has_guideline}
+
+
+def test_alternatives_prefer_visa_free_then_nearest():
+    from app.explore import alternatives
+
+    rows = [
+        _row("HU", "visa_required"), _row("RS", "visa_free", stay=30), _row("TR", "visa_free", stay=60),
+        _row("AL", "evisa"), _row("TH", "visa_free", stay=30), _row("AT", "visa_required"), _row("RU", "home", "home"),
+    ]
+    found = [a["code"] for a in alternatives(rows, instead_of="HU", origin="RU")]
+    # Visa-free ones first, nearest to Hungary first; never the blocked one, other visa countries or home.
+    assert found == ["RS", "TR", "TH", "AL"]
+
+
+def test_alternatives_verified_before_indicative_and_region_filter():
+    from app.explore import alternatives
+
+    rows = [_row("RS", "visa_free"), _row("TH", "visa_free", "verified", True), _row("GE", "visa_on_arrival")]
+    assert [a["code"] for a in alternatives(rows, origin="RU")] == ["TH", "RS", "GE"]
+    assert [a["code"] for a in alternatives(rows, origin="RU", region="Europe")] == ["RS"]
+
+
+def test_alternatives_only_easier_than_target():
+    from app.explore import alternatives
+
+    rows = [_row("GE", "visa_free"), _row("AM", "visa_free"), _row("IN", "evisa"), _row("EG", "visa_on_arrival")]
+    # Going to an e-visa country: only visa-free and visa-on-arrival options are easier.
+    assert {a["code"] for a in alternatives(rows, instead_of="IN")} == {"GE", "AM", "EG"}

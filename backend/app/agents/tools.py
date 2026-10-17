@@ -15,9 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import explore
 from app.agents import guidelines, journeys, rules
 from app.forms.templates import pdf_spec
-from app.models import CountryGuideline, Document, DocumentAnalysis, Journey, Task, User, utcnow
+from app.models import ChatSession, CountryGuideline, Document, DocumentAnalysis, Journey, Task, User, utcnow
+from app.services import visa_matrix
 
 Purpose = Literal["tourism", "study", "work", "job_search", "family"]
 
@@ -88,10 +90,33 @@ class TripWithDates(Trip):
 class NewJourney(TripWithDates):
     title: Optional[str] = Field(default=None, description="Short name, e.g. 'Master's in Budapest'; null for a default")
     continues_journey_id: Optional[str] = Field(default=None, description="id of a journey this one continues (next leg), or null")
+    allow_duplicate: bool = Field(default=False, description="true only when the user confirmed they want another journey for a destination and purpose they already have an open journey for")
+
+
+class NewJourneys(In):
+    trips: list[NewJourney] = Field(min_length=1, max_length=5, description="One entry per journey to create")
 
 
 class JourneyRef(In):
     journey_id: str
+
+
+class JourneyFocus(In):
+    journey_id: Optional[str] = Field(description="id of the journey to work on from now on, or null for none (general questions)")
+
+
+class DestinationSearch(In):
+    origin_code: str = Field(description="ISO alpha-2 code of the passport the user travels on")
+    purpose: Purpose
+    instead_of: Optional[str] = Field(default=None, description="ISO alpha-2 code of a destination the user can't (easily) go to; null to find the easiest destinations overall")
+    region: Optional[Literal["Africa", "Americas", "Asia", "Europe", "Oceania"]] = None
+    residence_code: Optional[str] = Field(default=None, description="ISO alpha-2 code of a country where the user holds a residence permit, or null")
+    limit: int = Field(default=8, ge=1, le=20)
+
+    @field_validator("origin_code", "instead_of", "residence_code")
+    @classmethod
+    def _codes(cls, v):
+        return None if v is None else _iso2(v)
 
 
 class JourneyUpdate(In):
@@ -139,6 +164,73 @@ async def _current(session: AsyncSession, t: Trip) -> tuple[Optional[CountryGuid
 async def _own_journey(session: AsyncSession, user: User, journey_id: str) -> Optional[Journey]:
     j = await session.get(Journey, journey_id)
     return j if j and j.user_id == user.id else None
+
+
+async def _focus(session: AsyncSession, ctx: Context, journey_id: Optional[str]) -> None:
+    """Make the conversation about this journey, also for later turns and in the UI."""
+    ctx.journey_id = journey_id
+    chat = await session.get(ChatSession, ctx.chat_id) if ctx.chat_id else None
+    if chat and chat.journey_id != journey_id:
+        chat.journey_id = journey_id
+        session.add(chat)
+        await session.commit()
+
+
+def _ui(kind: str, obj_id: str, title: str) -> dict:
+    """A link card the chat shows under the reply (stripped before the result reaches the model)."""
+    return {"kind": kind, "id": obj_id, "title": title}
+
+
+async def _open_duplicate(session: AsyncSession, user: User, t: NewJourney) -> Optional[Journey]:
+    """An open journey for the same destination and purpose, unless this is a next leg or a confirmed duplicate."""
+    if t.allow_duplicate or t.continues_journey_id:
+        return None
+    return (await session.exec(
+        select(Journey).where(Journey.user_id == user.id, Journey.destination_code == t.destination_code,
+                              Journey.purpose == t.purpose, Journey.status.in_(("planning", "active")))
+        .order_by(Journey.updated_at.desc())
+    )).first()
+
+
+async def _build(session: AsyncSession, user: User, t: NewJourney, ctx: Context) -> tuple[Optional[Journey], dict]:
+    """Create one journey; returns (journey or None, outcome for the model)."""
+    g, stale = await _current(session, t)
+    if stale:
+        return None, {"destination_code": t.destination_code, "purpose": t.purpose, **stale}
+    if t.continues_journey_id and not await _own_journey(session, user, t.continues_journey_id):
+        return None, {"status": "error", "message": "continues_journey_id is not one of this user's journeys"}
+    if dup := await _open_duplicate(session, user, t):
+        return dup, {
+            "status": "exists",
+            "journey": {**_jsonable(await journeys.summary(session, dup)), "url": f"/app/journeys/{dup.id}"},
+            "instruction": "The user already has an open journey for this destination and purpose. Work on it (switch_journey), "
+                           "or, if they confirm they want a second one, call again with allow_duplicate true.",
+        }
+    j = await journeys.create(
+        session, user, g, t.origin_code, date.fromisoformat(t.travel_date) if t.travel_date else None, t.stay_days,
+        title=t.title, parent_id=t.continues_journey_id, chat_id=ctx.chat_id,
+    )
+    return j, {"status": "created"}
+
+
+def _compact(view: dict) -> dict:
+    """A created journey in a few lines, for comparing several side by side."""
+    reqs = view["requirements"]
+    fees = view["finances"]["fees"]
+    return _jsonable({
+        "id": view["id"], "title": view["title"], "url": f"/app/journeys/{view['id']}", "visa_type": view["visa_type"],
+        "travel_date": view["travel_date"], "steps": view["progress"]["total"],
+        "documents": {s: sum(1 for r in reqs if r["status"] == s) for s in ("satisfied", "problem", "missing")},
+        "missing_documents": [r["title"] for r in reqs if r["status"] != "satisfied"],
+        "mandatory_fees": fees["mandatory_totals"], "amounts_not_fixed": fees["amounts_not_fixed"],
+        "next_steps": [st["title"] for st in view["steps"] if not st["done"]][:2],
+        "processing_days_max": view["guideline"]["processing_days_max"],
+    })
+
+
+def _explore_url(code: Optional[str] = None, alternatives: Optional[str] = None, origin: Optional[str] = None, purpose: Optional[str] = None) -> str:
+    params = [f"{k}={v}" for k, v in (("country", code), ("alternatives", alternatives), ("origin", origin), ("purpose", purpose)) if v]
+    return "/app/explore" + ("?" + "&".join(params) if params else "")
 
 
 def _guideline_view(g: CountryGuideline) -> dict[str, Any]:
@@ -219,18 +311,78 @@ async def check_my_documents(session, user, t: TripWithDates, ctx: Context):
 
 
 async def create_journey(session, user: User, t: NewJourney, ctx: Context):
-    g, stale = await _current(session, t)
-    if stale:
-        return stale
-    if t.continues_journey_id and not await _own_journey(session, user, t.continues_journey_id):
-        return {"status": "error", "message": "continues_journey_id is not one of this user's journeys"}
-    j = await journeys.create(
-        session, user, g, t.origin_code, date.fromisoformat(t.travel_date) if t.travel_date else None, t.stay_days,
-        title=t.title, parent_id=t.continues_journey_id, chat_id=ctx.chat_id,
-    )
-    ctx.journey_id = ctx.journey_id or j.id
+    j, outcome = await _build(session, user, t, ctx)
+    if outcome["status"] != "created":
+        return {**outcome, "_ui": [_ui("journey", j.id, j.title)] if j else []}
+    # The conversation moves on to the new journey; the others stay as they are.
+    await _focus(session, ctx, j.id)
     view = await journeys.view(session, user, j)
-    return {"status": "created", **_journey_for_agent(view, True)}
+    return {"status": "created", "now_working_on": j.id, **_journey_for_agent(view, True), "_ui": [_ui("journey", j.id, j.title)]}
+
+
+async def create_journeys(session, user: User, inp: NewJourneys, ctx: Context):
+    results, cards, first = [], [], None
+    for t in inp.trips:
+        j, outcome = await _build(session, user, t, ctx)
+        if outcome["status"] == "created":
+            first = first or j
+            outcome = {"status": "created", **_compact(await journeys.view(session, user, j))}
+        results.append(outcome)
+        if j:
+            cards.append(_ui("journey", j.id, j.title))
+    # A conversation that wasn't about any journey yet takes the first new one; otherwise it stays put.
+    if first and not ctx.journey_id:
+        await _focus(session, ctx, first.id)
+    return {
+        "status": "created" if first else "error",
+        "now_working_on": ctx.journey_id,
+        "journeys": results,
+        "note": "Compare the created journeys briefly (e.g. a table: visa type, missing documents, mandatory fees, processing time) "
+                "and link each url. Use switch_journey when the user picks one to work on.",
+        "_ui": cards,
+    }
+
+
+async def list_my_journeys(session, user: User, _: NoInput, ctx: Context):
+    js = (await session.exec(select(Journey).where(Journey.user_id == user.id).order_by(Journey.updated_at.desc()))).all()
+    out = []
+    for j in js:
+        s = await journeys.summary(session, j)
+        out.append({**s, "journey_status": s.pop("status"), "url": f"/app/journeys/{j.id}"})
+    return _jsonable({"current_journey_id": ctx.journey_id, "journeys": out})
+
+
+async def switch_journey(session, user: User, inp: JourneyFocus, ctx: Context):
+    if inp.journey_id is None:
+        await _focus(session, ctx, None)
+        return {"status": "saved", "now_working_on": None}
+    j = await _own_journey(session, user, inp.journey_id)
+    if not j:
+        return {"status": "error", "message": "No such journey for this user."}
+    await _focus(session, ctx, j.id)
+    view = await journeys.view(session, user, j)
+    return {"status": "saved", "now_working_on": j.id, **_journey_for_agent(view, view["guideline"]["status"] == "current"),
+            "_ui": [_ui("journey", j.id, j.title)]}
+
+
+async def suggest_destinations(session, user: User, inp: DestinationSearch, ctx: Context):
+    rows = await explore.decisions(session, inp.origin_code, inp.residence_code, inp.purpose)
+    target = next((r for r in rows if r["code"] == inp.instead_of), None) if inp.instead_of else None
+    found = explore.alternatives(rows, inp.instead_of, inp.origin_code, inp.region, limit=inp.limit)
+    for a in found:
+        a["map_url"] = _explore_url(a["code"], origin=inp.origin_code, purpose=inp.purpose)
+        for k in ("lat", "lng", "region"):
+            a.pop(k)
+    return {
+        "status": "current",
+        "instead_of": target and {k: target[k] for k in ("code", "status", "basis", "stay_days")},
+        "alternatives": found,
+        "map_url": _explore_url(alternatives=inp.instead_of or "any", origin=inp.origin_code, purpose=inp.purpose),
+        "note": "Ranked easiest entry first (visa_free, visa_on_arrival, evisa), then verified before indicative, then nearest. "
+                "basis 'indicative' comes from the open " + visa_matrix.SOURCE["title"] + " (as of " + visa_matrix.SOURCE["as_of"] + "), "
+                "short tourist visits only and not checked by Unbound: say so. Only destinations with has_guideline true can become a "
+                "journey right away. Link map_url so the user can see the options on the map.",
+    }
 
 
 async def get_journey(session, user: User, inp: JourneyRef, ctx: Context):
@@ -285,6 +437,7 @@ async def prefill_form(session, user: User, inp: PrefillInput, ctx: Context):
         "status": "created", "form_id": form.id, "url": f"/app/forms/{form.id}", "title": form.title,
         "filled": len(form.fields) - len(missing), "total": len(form.fields), "missing_fields": missing,
         "official_pdf": pdf_spec(form.form_key) is not None,
+        "_ui": [_ui("form", form.id, form.title)],
         "note": "Missing fields couldn't be filled from the user's documents, profile or journey. On the form page the user can "
                 "correct values and download " + ("the official form with the values written in (to print and sign)"
                 if pdf_spec(form.form_key) else "a data sheet to copy into the online application") + ".",
@@ -323,8 +476,25 @@ TOOLS: dict[str, tuple[type[In], Handler, str, str, tuple[str, ...]]] = {
     "create_journey": (NewJourney, create_journey,
         "Create a journey: the user's plan for a trip or move. Builds the pathway (documents to get, then application steps "
         "with due dates), and returns documents needed, financial overview and automation options. Confirm destination, "
-        "citizenship and purpose first; ask for the travel date and length of stay if unknown. Use continues_journey_id for a next leg.",
-        "Building your journey", ("journeys", "tasks")),
+        "citizenship and purpose first; ask for the travel date and length of stay if unknown. Use continues_journey_id for a next leg. "
+        "Existing journeys are kept; the conversation moves on to the new one.",
+        "Building your journey", ("journeys", "tasks", "chats")),
+    "create_journeys": (NewJourneys, create_journeys,
+        "Create several journeys in one call (up to 5), e.g. to compare destinations or purposes the user is considering. "
+        "Same rules and inputs as create_journey for each; returns a short comparison of each journey.",
+        "Building your journeys", ("journeys", "tasks", "chats")),
+    "list_my_journeys": (NoInput, list_my_journeys,
+        "All the user's journeys (they can have several at once) with status, progress and next step, and which one this conversation is working on.",
+        "Listing your journeys", ()),
+    "switch_journey": (JourneyFocus, switch_journey,
+        "Make this conversation work on another of the user's journeys (or none, with null). Returns that journey like get_journey. "
+        "Use it when the user turns to a different journey than the current one.",
+        "Switching journey", ("chats",)),
+    "suggest_destinations": (DestinationSearch, suggest_destinations,
+        "Destinations that are easier to enter than one the user can't go to (instead_of), or the easiest overall: visa-free first, "
+        "then visa on arrival and e-visa, nearest first. Use when a destination needs a visa the user can't get, isn't supported yet, "
+        "or the user asks where they could go. Returns map links.",
+        "Finding easier destinations", ()),
     "get_journey": (JourneyRef, get_journey,
         "A journey with its pathway steps (ids, done or not), documents needed, finances and automation options.",
         "Opening your journey", ()),
@@ -367,3 +537,8 @@ async def run(session: AsyncSession, user: User, name: str, raw_input: Any, ctx:
         # Also catches inputs cut short by eager streaming: the call never runs.
         return {"error": "INVALID_INPUT", "details": e.errors(include_url=False, include_context=False)}, True
     return await handler(session, user, inp, ctx or Context()), False
+
+
+def ui_refs(result: dict) -> list[dict]:
+    """Takes the chat's link cards out of a tool result: they are for the UI, not the model."""
+    return result.pop("_ui", None) or []

@@ -12,6 +12,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
+from sqlalchemy import or_
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -87,7 +88,7 @@ async def create(session: AsyncSession, user: User, g: CountryGuideline, origin:
                  stay_days: Optional[int], title: Optional[str] = None, parent_id: Optional[str] = None,
                  chat_id: Optional[str] = None) -> Journey:
     j = Journey(
-        user_id=user.id, parent_id=parent_id, origin_code=origin, destination_code=g.destination_code,
+        user_id=user.id, parent_id=parent_id, chat_id=chat_id, origin_code=origin, destination_code=g.destination_code,
         destination_name=g.destination_name, purpose=g.purpose, visa_type=g.visa_type,
         guideline_id=g.id, guideline_version=g.version, travel_date=travel, stay_days=stay_days,
         title=title or f"{g.destination_name} · {g.purpose.replace('_', ' ')}",
@@ -95,11 +96,6 @@ async def create(session: AsyncSession, user: User, g: CountryGuideline, origin:
     session.add(j)
     await session.flush()
     session.add_all(pathway_tasks(user, j, g))
-    if chat_id:
-        chat = await session.get(ChatSession, chat_id)
-        if chat and chat.user_id == user.id and not chat.journey_id:
-            chat.journey_id = j.id
-            session.add(chat)
     await session.commit()
     await session.refresh(j)
     return j
@@ -214,7 +210,11 @@ async def view(session: AsyncSession, user: User, j: Journey) -> dict[str, Any]:
     tasks = (await session.exec(select(Task).where(Task.journey_id == j.id).order_by(Task.seq, Task.created_at))).all()
     forms = (await session.exec(select(PrefilledForm).where(PrefilledForm.journey_id == j.id).order_by(PrefilledForm.created_at.desc()))).all()
     payments = (await session.exec(select(Payment).where(Payment.journey_id == j.id))).all()
-    chats = (await session.exec(select(ChatSession).where(ChatSession.journey_id == j.id).order_by(ChatSession.updated_at.desc()))).all()
+    # Conversations about it now, and the one it was planned in (which may have moved on to another journey).
+    about = or_(ChatSession.journey_id == j.id, ChatSession.id == j.chat_id) if j.chat_id else ChatSession.journey_id == j.id
+    chats = (await session.exec(
+        select(ChatSession).where(ChatSession.user_id == j.user_id, about).order_by(ChatSession.updated_at.desc())
+    )).all()
     children = (await session.exec(select(Journey).where(Journey.parent_id == j.id))).all()
     parent = await session.get(Journey, j.parent_id) if j.parent_id else None
 
@@ -256,7 +256,7 @@ async def view(session: AsyncSession, user: User, j: Journey) -> dict[str, Any]:
         "automation": automation(j, g, gap, forms, payments, tasks),
         "forms": [{"id": f.id, "title": f.title, "created_at": f.created_at,
                    "missing": sum(1 for x in f.fields if x["status"] == "missing")} for f in forms],
-        "chats": [{"id": c.id, "title": c.title, "updated_at": c.updated_at} for c in chats],
+        "chats": [{"id": c.id, "title": c.title, "updated_at": c.updated_at, "created_here": c.id == j.chat_id} for c in chats],
         "parent": {"id": parent.id, "title": parent.title} if parent else None,
         "continuations": [{"id": c.id, "title": c.title, "status": c.status} for c in children],
     }

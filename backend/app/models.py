@@ -179,6 +179,8 @@ class Journey(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     user_id: str = Field(foreign_key="users.id", index=True)
     parent_id: Optional[str] = Field(default=None, foreign_key="journeys.id")  # the leg this one continues
+    # The conversation that created it. No foreign key: deleting that conversation keeps the journey.
+    chat_id: Optional[str] = Field(default=None, index=True)
     title: str
     origin_code: str
     destination_code: str

@@ -43,8 +43,15 @@ Journeys
 - After creating or opening a journey, summarise briefly: documents they already have, what's missing or has a problem, the fees (and any fee whose amount varies), the next one or two steps, and what Unbound can automate (prefill forms, pay fees with Wise, add deadlines to the calendar, draft requests for documents). Link the journey with its url.
 - If the conversation is about a journey (see the context), work on that journey: open it with get_journey, mark steps done with set_step_done when the user says they did something, change dates with update_journey.
 - Completed journeys can be reopened (status active) for more help. For a next leg (moving on, extending, a new country), create a new journey with continues_journey_id.
+- Users can have several journeys at once (e.g. a trip now and a move later, or two options they're comparing). The context lists their open journeys. When the user turns to another one, call switch_journey with its id before working on it; if it's unclear which they mean, ask, naming the candidates. create_journey keeps the existing journeys and moves the conversation to the new one. Never merge or delete journeys on your own.
+- When the user wants to plan or compare several destinations or purposes, create them together with create_journeys (one call), then compare them in a short table and ask which one to work on first.
+- If create_journey answers "exists", the user already has that journey: continue with it (switch_journey) instead of making another, unless they say they want a second one.
+- The chat shows a card for each journey or form a tool returns, so keep the links in your text short.
 - When a form is prefilled, give its link, list the fields the user still has to complete, and say they can correct values there and download the official form filled in (or a data sheet for online applications).
 - Save details the user tells you about themselves with update_my_profile.
+
+Where else to go
+- When the user can't go somewhere (a visa they can't get, a refusal, entry not allowed, no up-to-date guidelines) or asks where they could go, call suggest_destinations (instead_of = the blocked destination, or null for open questions). Prefer visa-free options, then visa on arrival, then e-visa, and say why each is easier. Link the map_url so they can see them on the map, and say which come from indicative data. Offer to build a journey for the one they pick.
 
 Style
 - Plain, warm, concise. Short paragraphs and bullet lists. Use the user's language.
@@ -93,12 +100,14 @@ class _Turn:
                 log.exception("tool %s failed", name)
                 await self.session.rollback()
                 result, is_error = {"error": "The tool failed unexpectedly."}, True
+            refs = tools.ui_refs(result) if isinstance(result, dict) else []
             if not is_error and result.get("status") not in ("error", "not_up_to_date"):
                 self.changed.update(tools.TOOLS[name][4])
             state = "error" if is_error else "done"
-            events.append({"name": name, "label": label, "state": state})
+            step = {"name": name, "label": label, "state": state, **({"refs": refs} if refs else {})}
+            events.append(step)
             results.append((result, is_error))
-            yield {"type": "tool", "name": name, "label": label, "state": state}
+            yield {"type": "tool", **step}
 
 
 CUT_OFF = "Not run: the response was cut off before this call was complete."
@@ -376,6 +385,12 @@ async def run_turn(user_id: str, chat_id: str, text: str) -> AsyncIterator[dict]
             j = await session.get(Journey, chat.journey_id)
             if j:
                 context += f"; this conversation is about journey {j.id} ({j.title}, status {j.status})"
+        open_journeys = (await session.exec(
+            select(Journey).where(Journey.user_id == user.id, Journey.status.in_(("planning", "active")))
+            .order_by(Journey.updated_at.desc()).limit(10)
+        )).all()
+        if open_journeys:
+            context += "; open journeys: " + ", ".join(f"{j.id} ({j.title}, {j.destination_code}, {j.status})" for j in open_journeys)
         context += "</context>"
         if provider == "gemini":
             user_content = [{"text": context}, {"text": text}]

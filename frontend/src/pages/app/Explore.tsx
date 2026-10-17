@@ -1,6 +1,7 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router'
-import { ChevronDown, Loader2, Search, Star } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router'
+import { ChevronDown, Loader2, Route, Search, Star } from 'lucide-react'
+import { AlternativesCard } from '@/components/explore/Alternatives'
 import { CountryPanel } from '@/components/explore/CountryPanel'
 import { centreOf, loadCountries, regions, regionView, type CountryFeature, type Region } from '@/components/explore/geo'
 import { statusColor } from '@/components/explore/status'
@@ -8,7 +9,7 @@ import { Card, CardTitle, Field, PageHeader, Segmented } from '@/components/ui/p
 import { useI18n } from '@/i18n'
 import * as api from '@/lib/api'
 import { cn } from '@/lib/format'
-import { travelPurposes, visaStatuses, type TravelPurpose, type VisaMap, type VisaStatus } from '@/lib/types'
+import { travelPurposes, visaStatuses, type DestinationAlternatives, type TravelPurpose, type VisaMap, type VisaStatus } from '@/lib/types'
 import { useAuth, useToast } from '@/store/context'
 
 const GlobeView = lazy(() => import('@/components/explore/GlobeView'))
@@ -49,11 +50,23 @@ export function ExplorePage() {
   const { user, updateUser } = useAuth()
   const { toast } = useToast()
   const { t, country, locale } = useI18n()
+  const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const selected = params.get('country') ?? undefined
+  // ?alternatives=XX shows easier destinations than XX; ?alternatives=any the easiest overall.
+  const altParam = params.get('alternatives')
+  const altMode = !!altParam
+  const insteadOf = altParam && altParam !== 'any' ? altParam : undefined
 
   // Overrides for "what if" exploring; unset values come from the profile on the server.
-  const [query, setQuery] = useState<api.ExploreQuery>({})
+  // Links from the assistant can carry the passport and purpose they were about.
+  const [query, setQuery] = useState<api.ExploreQuery>(() => {
+    const purpose = params.get('purpose')
+    return {
+      origin: params.get('origin') ?? undefined,
+      purpose: travelPurposes.includes(purpose as TravelPurpose) ? (purpose as TravelPurpose) : undefined,
+    }
+  })
   const [map, setMap] = useState<{ for: string; data?: VisaMap; error?: string } | null>(null)
   const [features, setFeatures] = useState<CountryFeature[]>([])
   const [favorites, setFavorites] = useState<string[]>([])
@@ -85,6 +98,24 @@ export function ExplorePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const altKey = altMode ? `${insteadOf ?? 'any'}|${region}|${queryKey}` : ''
+  const [alts, setAlts] = useState<{ for: string; data?: DestinationAlternatives; error?: string } | null>(null)
+  useEffect(() => {
+    if (!altKey) return
+    let cancelled = false
+    api.getAlternatives(JSON.parse(queryKey), insteadOf, region === 'all' ? undefined : region).then(
+      (data) => !cancelled && setAlts({ for: altKey, data }),
+      (e) => !cancelled && setAlts({ for: altKey, error: e instanceof Error ? e.message : t('error.generic') }),
+    )
+    return () => {
+      cancelled = true
+    }
+    // altKey encodes the inputs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [altKey])
+  const altResult = alts?.for === altKey ? alts : null
+  const altCodes = useMemo(() => new Set(altResult?.data?.alternatives.map((a) => a.code) ?? []), [altResult])
+
   const data = map?.data
   const loading = !map || map.for !== queryKey
   const decisions = useMemo(() => new Map(data?.countries.map((c) => [c.code, c])), [data])
@@ -92,8 +123,11 @@ export function ExplorePage() {
   const statusOf = useCallback((code: string): VisaStatus => decisions.get(code)?.status ?? 'unknown', [decisions])
   const regionOf = useCallback((code: string) => featureOf.get(code)?.properties.region, [featureOf])
   const visible = useCallback(
-    (code: string) => shown.has(statusOf(code)) && (region === 'all' || regionOf(code) === region),
-    [shown, statusOf, region, regionOf],
+    (code: string) =>
+      altMode
+        ? altCodes.has(code) || code === insteadOf
+        : shown.has(statusOf(code)) && (region === 'all' || regionOf(code) === region),
+    [altMode, altCodes, insteadOf, shown, statusOf, region, regionOf],
   )
 
   const counts = useMemo(() => {
@@ -120,6 +154,33 @@ export function ExplorePage() {
     const f = code && featureOf.get(code)
     if (f) setFocus({ ...centreOf(f), altitude: 1.6 })
   }
+
+  // Routes on the globe: from the blocked destination (or the passport country) to each alternative.
+  const arcs = useMemo(() => {
+    const fromCode = insteadOf ?? data?.origin
+    const from = fromCode && featureOf.get(fromCode)
+    if (!altResult?.data || !from) return []
+    const start = centreOf(from)
+    return altResult.data.alternatives.flatMap((a) => {
+      const f = featureOf.get(a.code)
+      const end = a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : f && centreOf(f)
+      return end ? [{ startLat: start.lat, startLng: start.lng, endLat: end.lat, endLng: end.lng, color: statusColor[a.status] }] : []
+    })
+  }, [altResult, insteadOf, data?.origin, featureOf])
+
+  const showAlternatives = (code?: string) => {
+    setParams((p) => {
+      p.set('alternatives', code ?? 'any')
+      return p
+    })
+    const f = featureOf.get(code ?? data?.origin ?? '')
+    if (f) setFocus({ ...centreOf(f), altitude: 2.2 })
+  }
+  const hideAlternatives = () =>
+    setParams((p) => {
+      p.delete('alternatives')
+      return p
+    })
 
   const toggleFavorite = async (code: string) => {
     const on = favorites.includes(code)
@@ -193,6 +254,7 @@ export function ExplorePage() {
                       labelOf={(c) => [country(c), t(`explore.status.${statusOf(c)}`)]}
                       selected={selected}
                       focus={focus}
+                      arcs={arcs}
                       onSelect={select}
                     />
                   )}
@@ -226,6 +288,7 @@ export function ExplorePage() {
                   query={query}
                   favorite={favorites.includes(selected)}
                   onToggleFavorite={() => toggleFavorite(selected)}
+                  onShowAlternatives={selected === insteadOf ? undefined : () => showAlternatives(selected)}
                   onClose={() => select(undefined)}
                 />
               </div>
@@ -234,6 +297,26 @@ export function ExplorePage() {
         </Card>
 
         <aside className="flex min-h-0 flex-col gap-3 lg:overflow-y-auto">
+          {altMode ? (
+            <AlternativesCard
+              insteadOf={insteadOf}
+              result={altResult}
+              selected={selected}
+              onPick={select}
+              onAsk={(prompt) => navigate(`/app?new=1&prompt=${encodeURIComponent(prompt)}`)}
+              onClose={hideAlternatives}
+            />
+          ) : (
+            data?.origin && (
+              <button
+                type="button"
+                onClick={() => showAlternatives()}
+                className="flex shrink-0 items-center justify-center gap-2 rounded-full border-2 border-rose-200 bg-white px-5 py-2.5 text-[13px] font-semibold hover:border-brick-600"
+              >
+                <Route className="size-4 text-brick-600" aria-hidden /> {t('explore.alt.find')}
+              </button>
+            )
+          )}
           <Card className="p-5">
             <CardTitle>{t('explore.profile')}</CardTitle>
             <p className="mt-1 text-[13px] text-muted">{t(`explore.originSource.${data?.originSource ?? 'none'}`)}</p>

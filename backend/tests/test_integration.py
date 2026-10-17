@@ -194,6 +194,39 @@ PAGE = ("A kérelemhez csatolni kell: érvényes úti okmány másolatát; a sz�
         "igazolását; egészségbiztosítás igazolását. Az eljárás díja 18 000 Ft. ") * 3
 
 
+def test_several_journeys_in_one_conversation():
+    """Plan two journeys at once, refuse a silent duplicate, switch between them, keep the link to the conversation."""
+    async def go():
+        async with async_session_maker() as s:
+            u, g, chat = await _setup(s)
+            try:
+                trip = {"destination_code": DEST, "origin_code": "RU", "purpose": "tourism"}
+                ctx = tools.Context(chat_id=chat.id)
+                r, err = await tools.run(s, u, "create_journeys", {"trips": [trip, {**trip, "allow_duplicate": True, "title": "Plan B"}]}, ctx)
+                refs = tools.ui_refs(r)
+                assert not err and [x["status"] for x in r["journeys"]] == ["created", "created"], r
+                assert [x["kind"] for x in refs] == ["journey", "journey"] and "_ui" not in r  # cards never reach the model
+                first, second = (x["id"] for x in r["journeys"])
+                assert r["journeys"][0]["missing_documents"] == ["Travel insurance", "Accommodation"]
+                assert ctx.journey_id == first  # a conversation without a journey takes the first
+
+                r, _ = await tools.run(s, u, "create_journey", trip, ctx)
+                assert r["status"] == "exists" and r["journey"]["id"] in (first, second)
+                assert len((await s.exec(select(Journey).where(Journey.user_id == u.id))).all()) == 2
+
+                r, _ = await tools.run(s, u, "switch_journey", {"journey_id": second}, ctx)
+                await s.refresh(chat)
+                assert r["now_working_on"] == second == chat.journey_id == ctx.journey_id
+                assert (await tools.run(s, u, "switch_journey", {"journey_id": "not-mine"}, ctx))[0]["status"] == "error"
+
+                # The first journey still lists the conversation it was planned in, though the chat moved on.
+                view = await journeys.view(s, u, await s.get(Journey, first))
+                assert [(c["id"], c["created_here"]) for c in view["chats"]] == [(chat.id, True)]
+            finally:
+                await _cleanup(s, u.id)
+    run(go())
+
+
 def test_pipeline_publish_reverify_and_hold(monkeypatch):
     target = Target("zz-tourism", DEST, "Testland", "*", "tourism", "test route", ("https://oif.gov.hu/zz",), (SCHENGEN_FORM,))
     pages = {"https://oif.gov.hu/zz": Page("https://oif.gov.hu/zz", "https://oif.gov.hu/zz", 200, text=PAGE, title="ZZ", content_hash="h1")}

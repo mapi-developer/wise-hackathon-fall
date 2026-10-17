@@ -3,6 +3,14 @@ import Globe, { type GlobeMethods } from 'react-globe.gl'
 import { MeshPhongMaterial } from 'three'
 import type { CountryFeature } from './geo'
 
+export interface GlobeArc {
+  startLat: number
+  startLng: number
+  endLat: number
+  endLng: number
+  color: string
+}
+
 const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 
 /**
@@ -16,6 +24,7 @@ export default function GlobeView({
   labelOf,
   selected,
   focus,
+  arcs = [],
   onSelect,
 }: {
   features: CountryFeature[]
@@ -26,6 +35,8 @@ export default function GlobeView({
   selected?: string
   /** Where to turn the camera; changes trigger a smooth move. */
   focus?: { lat: number; lng: number; altitude: number }
+  /** Routes to draw, e.g. from a blocked destination to easier alternatives; a ring pulses where they start. */
+  arcs?: GlobeArc[]
   onSelect: (code: string) => void
 }) {
   const wrap = useRef<HTMLDivElement>(null)
@@ -33,6 +44,7 @@ export default function GlobeView({
   const [size, setSize] = useState({ width: 0, height: 0 })
   const [hover, setHover] = useState<string | undefined>()
   // Ocean: a lit blue sphere, so the land colours sit on something that reads as a real globe.
+  const rings = useMemo(() => (arcs.length ? [{ lat: arcs[0].startLat, lng: arcs[0].startLng }] : []), [arcs])
   const material = useMemo(() => new MeshPhongMaterial({ color: '#1f5f99', emissive: '#0a2a4a', shininess: 18 }), [])
 
   useEffect(() => {
@@ -85,6 +97,19 @@ export default function GlobeView({
             const [title, sub] = labelOf((f as CountryFeature).properties.code)
             return `<div style="background:#03100a;color:#fff;padding:6px 10px;border-radius:10px;font:13px Onest,sans-serif"><b>${escape(title)}</b><br/><span style="color:#d8a9a9">${escape(sub)}</span></div>`
           }}
+          arcsData={arcs}
+          arcColor={(a: object) => ['rgba(255,255,255,0.85)', (a as GlobeArc).color]}
+          arcStroke={0.6}
+          arcDashLength={0.45}
+          arcDashGap={0.15}
+          arcDashAnimateTime={2200}
+          arcAltitudeAutoScale={0.35}
+          arcsTransitionDuration={400}
+          ringsData={rings}
+          ringColor={() => (t: number) => `rgba(255,255,255,${1 - t})`}
+          ringMaxRadius={4}
+          ringPropagationSpeed={2}
+          ringRepeatPeriod={900}
           onPolygonHover={(f) => setHover((f as CountryFeature | null)?.properties.code)}
           onPolygonClick={(f) => onSelect((f as CountryFeature).properties.code)}
         />

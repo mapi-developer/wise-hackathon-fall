@@ -11,13 +11,23 @@ Precedence, strongest first:
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import pycountry
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.agents import guidelines as guideline_store
 from app.models import CountryGuideline, VisaRequirement
+from app.services import visa_matrix
+
+# Country centroids, regions and subregions (UN M49), for ranking alternatives by distance.
+GEO_FILE = Path(__file__).resolve().parents[1] / "data" / "geo" / "countries.json"
 
 STATUSES = ("visa_free", "visa_on_arrival", "evisa", "visa_required", "unknown", "home")
 
@@ -165,3 +175,79 @@ def guideline_detail(g: CountryGuideline) -> dict:
         "sources": g.sources,
     })
     return out
+
+
+async def decisions(session: AsyncSession, origin: Optional[str], residence: Optional[str], purpose: str) -> list[dict]:
+    """Every destination's decision for one passport, residence permit and purpose (the explore map)."""
+    matrix = await visa_matrix.for_origin(session, origin) if origin else {}
+    rows = (await session.exec(select(CountryGuideline))).all()
+    codes = set(await visa_matrix.passports(session)) | set(matrix) | {g.destination_code for g in rows}
+    out = []
+    for code in sorted(codes):
+        g = pick_guideline(rows, code, origin, purpose)
+        current = bool(g) and guideline_store.freshness(g)[0] == "current"
+        d = decide(code, origin, residence, purpose, matrix.get(code), g, current)
+        out.append({**d.as_dict(), "has_guideline": current})
+    return out
+
+
+# ------------------------------------------------------------ alternatives
+
+# How easy entry is, easiest first. Visa-free beats everything else, as the user asked.
+EASE = {"visa_free": 0, "visa_on_arrival": 1, "evisa": 2, "visa_required": 3, "unknown": 4}
+REGIONS = ("Africa", "Americas", "Asia", "Europe", "Oceania")
+
+
+@lru_cache(maxsize=1)
+def geo() -> dict[str, dict]:
+    return json.loads(GEO_FILE.read_text(encoding="utf-8")) if GEO_FILE.exists() else {}
+
+
+def distance_km(a: str, b: str) -> Optional[int]:
+    """Great-circle distance between two countries' centroids; None if either is unknown."""
+    ga, gb = geo().get(a), geo().get(b)
+    if not ga or not gb:
+        return None
+    la1, lo1, la2, lo2 = map(math.radians, (ga["lat"], ga["lng"], gb["lat"], gb["lng"]))
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return round(6371 * 2 * math.asin(math.sqrt(h)))
+
+
+def alternatives(
+    rows: list[dict],
+    instead_of: Optional[str] = None,
+    origin: Optional[str] = None,
+    region: Optional[str] = None,
+    exclude: frozenset[str] = frozenset(),
+    limit: int = 8,
+) -> list[dict]:
+    """
+    Destinations easier to enter than `instead_of` (or the easiest anywhere), best first.
+
+    Ranked by ease of entry (visa-free first), then verified guidelines before indicative data,
+    then distance to `instead_of` (close to where the user wanted to go) or, without one, to `origin`.
+    `rows` are decisions() output; `home` and `unknown` destinations are never suggested.
+    """
+    target = next((r for r in rows if r["code"] == instead_of), None) if instead_of else None
+    # Without a target, or when the target is itself easy, anything visa-free to e-visa will do.
+    ceiling = min(EASE.get(target["status"], 4), EASE["evisa"] + 1) if target else EASE["evisa"] + 1
+    place = geo()
+    near = instead_of or origin
+    target_geo = place.get(instead_of or "")
+    out = []
+    for r in rows:
+        ease = EASE.get(r["status"])
+        if ease is None or ease >= ceiling or r["code"] in exclude or r["code"] == instead_of:
+            continue
+        g = place.get(r["code"], {})
+        if region and g.get("region") != region:
+            continue
+        km = distance_km(near, r["code"]) if near else None
+        out.append({
+            "code": r["code"], "status": r["status"], "basis": r["basis"], "stay_days": r["stay_days"],
+            "has_guideline": r["has_guideline"], "region": g.get("region"), "lat": g.get("lat"), "lng": g.get("lng"),
+            "distance_km": km,
+            "same_subregion": bool(target_geo and g.get("subregion") == target_geo.get("subregion")),
+        })
+    out.sort(key=lambda a: (EASE[a["status"]], not a["has_guideline"], a["distance_km"] if a["distance_km"] is not None else math.inf, a["code"]))
+    return out[:limit]

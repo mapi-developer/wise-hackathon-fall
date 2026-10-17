@@ -375,6 +375,20 @@ async def create_chat_session(payload: Optional[ChatCreate] = None, user: User =
     return session_out(chat)
 
 
+@app.patch("/api/chat/sessions/{chat_id}")
+async def update_chat_session(chat_id: str, payload: ChatCreate, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    """Point a conversation at another journey (or none): the assistant then works on that one."""
+    chat = await owned(session, ChatSession, chat_id, user, "Conversation")
+    if payload.journey_id:
+        await owned(session, Journey, payload.journey_id, user, "Journey")
+    chat.journey_id = payload.journey_id
+    chat.updated_at = utcnow()
+    session.add(chat)
+    await session.commit()
+    await session.refresh(chat)
+    return session_out(chat)
+
+
 @app.delete("/api/chat/sessions/{chat_id}", status_code=204)
 async def delete_chat_session(chat_id: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
     chat = await owned(session, ChatSession, chat_id, user, "Conversation")
@@ -667,17 +681,27 @@ async def explore_map(
     session: AsyncSession = Depends(get_session),
 ):
     profile = await travel_profile(session, user, origin, residence, purpose)
-    o = profile["origin"]
-    matrix = await visa_matrix.for_origin(session, o) if o else {}
-    guidelines = (await session.exec(select(CountryGuideline))).all()
-    passports = await visa_matrix.passports(session)
-    countries = []
-    for code in sorted(set(passports) | set(matrix) | {g.destination_code for g in guidelines}):
-        g = explore.pick_guideline(guidelines, code, o, profile["purpose"])
-        current = bool(g) and guideline_store.freshness(g)[0] == "current"
-        d = explore.decide(code, o, profile["residence"], profile["purpose"], matrix.get(code), g, current)
-        countries.append({**d.as_dict(), "has_guideline": current})
-    return {**profile, "source": visa_matrix.SOURCE, "passports": passports, "countries": countries}
+    countries = await explore.decisions(session, profile["origin"], profile["residence"], profile["purpose"])
+    return {**profile, "source": visa_matrix.SOURCE, "passports": await visa_matrix.passports(session), "countries": countries}
+
+
+@app.get("/api/explore/alternatives")
+async def explore_alternatives(
+    instead_of: Optional[str] = Query(None, pattern=CODE, description="Destination the user can't easily go to"),
+    region: Optional[str] = Query(None, pattern=r"^(Africa|Americas|Asia|Europe|Oceania)$"),
+    origin: Optional[str] = Query(None, pattern=CODE),
+    residence: Optional[str] = Query(None, pattern=r"^([A-Z]{2})?$"),
+    purpose: Optional[str] = Query(None, pattern=PURPOSE),
+    limit: int = Query(8, ge=1, le=30),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Easier destinations than `instead_of` (visa-free first, then nearest), or the easiest overall."""
+    profile = await travel_profile(session, user, origin, residence, purpose)
+    rows = await explore.decisions(session, profile["origin"], profile["residence"], profile["purpose"])
+    target = next((r for r in rows if r["code"] == instead_of), None) if instead_of else None
+    found = explore.alternatives(rows, instead_of, profile["origin"], region, limit=limit)
+    return {**profile, "instead_of": target, "alternatives": found, "source": visa_matrix.SOURCE}
 
 
 @app.get("/api/explore/countries/{code}")

@@ -117,10 +117,18 @@ export interface ChatSessionInfo {
   updatedAt: string
 }
 
+/** Something a tool created or opened, shown as a card under the reply. */
+export interface ChatRef {
+  kind: 'journey' | 'form'
+  id: string
+  title: string
+}
+
 export interface ChatStep {
   name: string
   label: string
   state: 'start' | 'done' | 'error'
+  refs?: ChatRef[]
 }
 
 export interface ChatMessage {
@@ -220,7 +228,8 @@ export interface JourneyDetail extends JourneySummary {
   finances: JourneyFinances
   automation: AutomationAction[]
   forms: { id: string; title: string; createdAt: string; missing: number }[]
-  chats: { id: string; title: string; updatedAt: string }[]
+  /** `createdHere`: the conversation this journey was planned in. */
+  chats: { id: string; title: string; updatedAt: string; createdHere: boolean }[]
   parent?: { id: string; title: string }
   continuations: { id: string; title: string; status: JourneyStatus }[]
 }
@@ -348,6 +357,26 @@ export interface CountryGuidelineDetail {
   fees: { title: string; amount: string | null; currency: string }[]
   officialLinks: { title: string; url: string }[]
   sources: { title: string; url: string }[]
+}
+
+/** A destination that is easier to enter than the one the user can't go to (backend/app/explore.py). */
+export interface DestinationAlternative {
+  code: string
+  status: VisaStatus
+  basis: VisaBasis
+  stayDays?: number
+  hasGuideline: boolean
+  lat?: number
+  lng?: number
+  distanceKm?: number
+  sameSubregion: boolean
+}
+
+export interface DestinationAlternatives extends TravelProfile {
+  /** The blocked destination, when looking for alternatives to one. */
+  insteadOf?: VisaDecision
+  alternatives: DestinationAlternative[]
+  source: DataSource
 }
 
 export interface CountryVisaDetail extends TravelProfile {

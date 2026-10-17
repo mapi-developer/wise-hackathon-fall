@@ -33,6 +33,7 @@ import type {
   User,
   VisaDecision,
   VisaMap,
+  DestinationAlternatives,
   CountryVisaDetail,
   DataSource,
 } from './types'
@@ -360,6 +361,10 @@ export const listChats = async () => (await request<ApiSession[]>('/api/chat/ses
 export const createChat = async (journeyId?: string) =>
   toSession(await request<ApiSession>('/api/chat/sessions', { method: 'POST', body: { journey_id: journeyId ?? null } }))
 
+/** Point a conversation at another journey, or none. */
+export const setChatJourney = async (id: string, journeyId: string | null) =>
+  toSession(await request<ApiSession>(`/api/chat/sessions/${id}`, { method: 'PATCH', body: { journey_id: journeyId } }))
+
 export const deleteChat = (id: string) => request<null>(`/api/chat/sessions/${id}`, { method: 'DELETE' })
 
 /** Rows from the server, with consecutive assistant rows (text, tool steps, more text) merged into one reply. */
@@ -411,7 +416,7 @@ type ApiJourneyDetail = ApiJourneySummary & {
   finances: JourneyDetail['finances']
   automation: (Omit<JourneyDetail['automation'][number], 'formId'> & { form_id?: string | null })[]
   forms: { id: string; title: string; created_at: string; missing: number }[]
-  chats: { id: string; title: string; updated_at: string }[]
+  chats: { id: string; title: string; updated_at: string; created_here?: boolean }[]
   parent: { id: string; title: string } | null
   continuations: JourneyDetail['continuations']
 }
@@ -454,7 +459,7 @@ const toJourney = (j: ApiJourneyDetail): JourneyDetail => ({
   finances: j.finances,
   automation: j.automation.map(({ form_id, ...a }) => ({ ...a, formId: form_id ?? undefined })),
   forms: j.forms.map((f) => ({ id: f.id, title: f.title, createdAt: f.created_at, missing: f.missing })),
-  chats: j.chats.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updated_at })),
+  chats: j.chats.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updated_at, createdHere: !!c.created_here })),
   parent: j.parent ?? undefined,
   continuations: j.continuations,
 })
@@ -579,6 +584,42 @@ export async function getCountryVisa(code: string, q: ExploreQuery = {}): Promis
     indicative: r.indicative ? { category: r.indicative.category, stayDays: r.indicative.stay_days ?? undefined, raw: r.indicative.raw } : undefined,
     source: toSource(r.source),
     favorite: r.favorite,
+  }
+}
+
+interface ApiAlternative {
+  code: string
+  status: VisaDecision['status']
+  basis: VisaDecision['basis']
+  stay_days: number | null
+  has_guideline: boolean
+  lat: number | null
+  lng: number | null
+  distance_km: number | null
+  same_subregion: boolean
+}
+
+/** Easier destinations than `insteadOf` (visa-free first, then nearest), or the easiest overall. */
+export async function getAlternatives(q: ExploreQuery, insteadOf?: string, region?: string): Promise<DestinationAlternatives> {
+  const params = new URLSearchParams(exploreQuery(q).slice(1))
+  if (insteadOf) params.set('instead_of', insteadOf)
+  if (region) params.set('region', region)
+  const r = await request<ApiProfile & { instead_of: ApiDecision | null; alternatives: ApiAlternative[] }>(`/api/explore/alternatives?${params}`)
+  return {
+    ...toTravelProfile(r),
+    insteadOf: r.instead_of ? toDecision(r.instead_of) : undefined,
+    alternatives: r.alternatives.map((a) => ({
+      code: a.code,
+      status: a.status,
+      basis: a.basis,
+      stayDays: a.stay_days ?? undefined,
+      hasGuideline: a.has_guideline,
+      lat: a.lat ?? undefined,
+      lng: a.lng ?? undefined,
+      distanceKm: a.distance_km ?? undefined,
+      sameSubregion: a.same_subregion,
+    })),
+    source: toSource(r.source),
   }
 }
 

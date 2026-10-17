@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
-import { BadgeCheck, CircleAlert, ExternalLink, Info, Loader2, MessageSquareText, Star, X } from 'lucide-react'
+import { BadgeCheck, CircleAlert, ExternalLink, Info, Loader2, MessageSquareText, Route, Star, X } from 'lucide-react'
 import { Badge } from '@/components/ui/primitives'
 import { useI18n, type Key } from '@/i18n'
 import * as api from '@/lib/api'
@@ -34,12 +34,15 @@ export function CountryPanel({
   query,
   favorite,
   onToggleFavorite,
+  onShowAlternatives,
   onClose,
 }: {
   code: string
   query: api.ExploreQuery
   favorite: boolean
   onToggleFavorite: () => void
+  /** Show easier destinations than this one on the map; offered when entry isn't visa-free. */
+  onShowAlternatives?: () => void
   onClose: () => void
 }) {
   const { t, tOr, country } = useI18n()
@@ -173,6 +176,17 @@ export function CountryPanel({
             </li>
           ))}
         </ul>
+      )}
+
+      {onShowAlternatives && d.origin && ['visa_required', 'unknown', 'evisa', 'visa_on_arrival'].includes(decision.status) && (
+        <button
+          type="button"
+          onClick={onShowAlternatives}
+          className="flex items-center gap-2 rounded-xl border-2 border-rose-200 px-3 py-2.5 text-left text-[13px] font-semibold hover:border-brick-600"
+        >
+          <Route className="size-4 shrink-0 text-brick-600" aria-hidden />
+          <span className="flex-1">{t('explore.alt.show')}</span>
+        </button>
       )}
 
       {g && (

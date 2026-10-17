@@ -185,6 +185,19 @@ The indicative matrix is the open Passport Index dataset (MIT), bundled in `data
 colour a country from your own data, give its guideline an `entry_type`
 (`visa_free | visa_on_arrival | evisa | visa_required`) and verify it.
 
+The country endpoint also returns `routes` (ways in: visa-free, on arrival, eVisa/ETA, apply for a
+visa, or a Schengen residence permit) and, when entry needs more than a passport, `alternatives`:
+nearby countries ranked visa-free first, then visa on arrival, then eVisa, nearer first (a harder
+status counts as 1,500 km extra). Distances use rough country centres in `data/geo/centroids.json`
+(Natural Earth 1:110m, the same shapes as the globe). The chat agent gets the same ranking through
+the `find_destinations` tool, with map links.
+
+## Finances
+
+`GET /api/finances` gives every open journey's fees (from its guideline, each marked paid or not),
+paid and remaining totals, proof of funds and living costs, plus totals across journeys. Amounts are
+exact decimal strings per currency and are never converted or added across currencies.
+
 ## Tests
 
 ```bash

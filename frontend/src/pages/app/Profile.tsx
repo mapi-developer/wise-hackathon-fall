@@ -1,10 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router'
+import { Bell, Globe2, Languages, ShieldCheck, Wallet, type LucideIcon } from 'lucide-react'
+import { Flag } from '@/components/brand/Flag'
+import { profileKey, visaMapFor } from '@/components/explore/visa-cache'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
 import { Avatar, Card, CardTitle, Field, Input, PageHeader, Toggle } from '@/components/ui/primitives'
-import { useI18n, type Key } from '@/i18n'
-import type { ProfilePatch, Settings, User } from '@/lib/types'
+import { languages, useI18n, type Key } from '@/i18n'
+import { cn, money } from '@/lib/format'
+import { travelPurposes, type ProfilePatch, type Settings, type TravelPurpose, type User } from '@/lib/types'
 import { useAuth, useCase, useToast } from '@/store/context'
 
 const fields: { key: keyof ProfilePatch & keyof User; label: Key; placeholder: Key }[] = [
@@ -86,19 +90,107 @@ function EditDialog({ open, onClose, user }: { open: boolean; onClose: () => voi
   )
 }
 
+/** A titled block inside the settings panel. */
+function SettingsSection({ id, icon: Icon, title, hint, children }: { id: string; icon: LucideIcon; title: string; hint?: string; children: ReactNode }) {
+  return (
+    <section aria-labelledby={id} className="border-t border-rose-200 px-6 py-5 first:border-t-0">
+      <div className="flex items-start gap-3">
+        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-rose-100" aria-hidden>
+          <Icon className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <h3 id={id} className="text-[15px] font-semibold">
+            {title}
+          </h3>
+          {hint && <p className="text-xs text-muted">{hint}</p>}
+        </div>
+      </div>
+      <div className="mt-3 sm:pl-11">{children}</div>
+    </section>
+  )
+}
+
+const selectClass = 'h-11 w-full rounded-2xl border border-rose-300 bg-white px-3 text-[15px] outline-none focus:border-forest-950 disabled:opacity-60'
+
+/** Passport, residence permit and purpose: what the map, search and assistant personalise with. */
+function TravelSettings({ user }: { user: User }) {
+  const { updateUser } = useAuth()
+  const { toast } = useToast()
+  const { t, country, locale } = useI18n()
+  const [passports, setPassports] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    visaMapFor(profileKey(user)).then((m) => setPassports(m.passports), () => {})
+  }, [user])
+
+  const options = useMemo(() => {
+    const collator = new Intl.Collator(locale)
+    const codes = new Set(passports)
+    for (const c of [user.nationalityCode, user.residenceCode]) if (c) codes.add(c)
+    return [...codes].sort((a, b) => collator.compare(country(a), country(b)))
+  }, [passports, user.nationalityCode, user.residenceCode, country, locale])
+
+  const save = async (patch: ProfilePatch) => {
+    setSaving(true)
+    try {
+      await updateUser(patch)
+      toast(t('profile.saved'), 'success')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t('profile.saveFailed'), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <Field label={t('explore.passport')} htmlFor="set-passport">
+        <select id="set-passport" className={selectClass} disabled={saving} value={user.nationalityCode} onChange={(e) => save({ nationalityCode: e.target.value })}>
+          <option value="">{t('explore.choosePassport')}</option>
+          {options.map((c) => (
+            <option key={c} value={c}>
+              {country(c)}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label={t('explore.residence')} htmlFor="set-residence">
+        <select id="set-residence" className={selectClass} disabled={saving} value={user.residenceCode} onChange={(e) => save({ residenceCode: e.target.value })}>
+          <option value="">{t('explore.noResidence')}</option>
+          {options.map((c) => (
+            <option key={c} value={c}>
+              {country(c)}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label={t('explore.purpose')} htmlFor="set-purpose">
+        <select id="set-purpose" className={selectClass} disabled={saving} value={user.travelPurpose} onChange={(e) => save({ travelPurpose: e.target.value as TravelPurpose })}>
+          {travelPurposes.map((p) => (
+            <option key={p} value={p}>
+              {t(`explore.purpose.${p}`)}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </div>
+  )
+}
+
 export function ProfilePage() {
   const { user, logout, deleteAccount } = useAuth()
-  const { documents, tasks, payments } = useCase()
+  const { documents, tasks, payments, journeys } = useCase()
   const { toast } = useToast()
   const navigate = useNavigate()
   const [editing, setEditing] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
-  const { t, locale, country } = useI18n()
+  const { t, locale, language, setLanguage } = useI18n()
   if (!user) return null
 
   const downloadData = () => {
-    const data = { exportedAt: new Date().toISOString(), profile: user, tasks, documents, payments }
+    const data = { exportedAt: new Date().toISOString(), profile: user, journeys, tasks, documents, payments }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -107,6 +199,12 @@ export function ProfilePage() {
     URL.revokeObjectURL(a.href)
     toast(t('profile.downloading'))
   }
+
+  const activity: [string, number, string][] = [
+    [t('nav.journeys'), journeys.filter((j) => j.status !== 'archived').length, '/app/journeys'],
+    [t('nav.documents'), documents.length, '/app/documents'],
+    [t('profile.openTasks'), tasks.filter((x) => !x.done).length, '/app/todo'],
+  ]
 
   return (
     <>
@@ -120,7 +218,7 @@ export function ProfilePage() {
         }
       />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]">
         <div className="flex flex-col gap-4">
           <Card className="p-6">
             <div className="flex items-center gap-4">
@@ -145,34 +243,81 @@ export function ProfilePage() {
                   </dd>
                 </div>
               ))}
-              {(
-                [
-                  ['explore.passport', user.nationalityCode && country(user.nationalityCode)],
-                  ['explore.residence', user.residenceCode && country(user.residenceCode)],
-                  ['explore.purpose', t(`explore.purpose.${user.travelPurpose}`)],
-                ] as const
-              ).map(([label, value]) => (
-                <div key={label} className="contents">
-                  <dt className="text-muted">{t(label)}</dt>
-                  <dd className={value ? 'font-semibold' : 'text-muted/70'}>
-                    {value || (
-                      <Link to="/app/explore" className="underline underline-offset-2 hover:text-forest-950">
-                        {t('common.add')}
-                      </Link>
-                    )}
-                  </dd>
-                </div>
-              ))}
             </dl>
-            <Link to="/app/explore" className="mt-4 inline-block text-[13px] font-semibold underline underline-offset-2">
-              {t('profile.travelOnMap')}
-            </Link>
           </Card>
 
           <Card className="p-6">
-            <CardTitle>{t('profile.privacy')}</CardTitle>
-            <p className="mt-1 text-sm text-muted">{t('profile.privacyBody')}</p>
-            <div className="mt-5 flex flex-wrap gap-2">
+            <CardTitle>{t('profile.activity')}</CardTitle>
+            <ul className="mt-4 grid grid-cols-3 gap-2">
+              {activity.map(([label, count, to]) => (
+                <li key={to}>
+                  <Link to={to} className="block rounded-xl bg-blush px-3 py-3 hover:bg-rose-100">
+                    <span className="font-display block text-2xl font-semibold">{count}</span>
+                    <span className="block truncate text-xs text-muted">{label}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </div>
+
+        <Card className="overflow-hidden lg:sticky lg:top-[100px]">
+          <div className="border-b border-rose-200 bg-rose-100/60 px-6 py-4">
+            <CardTitle>{t('profile.settings')}</CardTitle>
+            <p className="text-xs text-muted">{t('profile.settingsSub')}</p>
+          </div>
+
+          <SettingsSection id="set-travel" icon={Globe2} title={t('profile.travel')} hint={t('profile.travelHint')}>
+            <TravelSettings user={user} />
+            <Link to="/app/explore" className="mt-3 inline-block text-[13px] font-semibold underline underline-offset-2">
+              {t('profile.travelOnMap')}
+            </Link>
+          </SettingsSection>
+
+          <SettingsSection id="set-language" icon={Languages} title={t('lang.label')} hint={t('profile.languageHint')}>
+            <div role="radiogroup" aria-labelledby="set-language" className="flex flex-wrap gap-2">
+              {languages.map((l) => (
+                <button
+                  key={l.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={language === l.value}
+                  onClick={() => setLanguage(l.value)}
+                  className={cn(
+                    'flex h-10 items-center gap-2 rounded-xl border-2 px-3 text-sm font-semibold',
+                    language === l.value ? 'border-forest-950 bg-rose-100' : 'border-rose-200 hover:border-rose-300',
+                  )}
+                >
+                  <Flag code={l.flag} /> {l.label}
+                </button>
+              ))}
+            </div>
+          </SettingsSection>
+
+          <SettingsSection id="set-notifications" icon={Bell} title={t('profile.notifications')}>
+            <SettingRow k="push" title={t('profile.push')} />
+            <SettingRow k="email" title={t('profile.email')} hint={t('profile.emailHint')} />
+            <SettingRow k="sms" title={t('profile.sms')} hint={t('profile.smsHint')} />
+          </SettingsSection>
+
+          <SettingsSection id="set-money" icon={Wallet} title={t('profile.money')} hint={t('profile.moneyHint')}>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <span>
+                <span className="text-muted">{t('finances.budget')}: </span>
+                <span className="font-semibold">{money(user.monthlyBudget)}</span>
+              </span>
+              <span>
+                <span className="text-muted">{t('finances.savings')}: </span>
+                <span className="font-semibold">{money(user.savings)}</span>
+              </span>
+              <Link to="/app/finances" className="text-[13px] font-semibold underline underline-offset-2">
+                {t('profile.manageMoney')}
+              </Link>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection id="set-privacy" icon={ShieldCheck} title={t('profile.privacy')} hint={t('profile.privacyBody')}>
+            <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={downloadData}>
                 {t('profile.download')}
               </Button>
@@ -190,14 +335,7 @@ export function ProfilePage() {
                 {t('profile.deleteAccount')}
               </Button>
             </div>
-          </Card>
-        </div>
-
-        <Card className="h-fit p-6">
-          <CardTitle className="mb-2">{t('profile.notifications')}</CardTitle>
-          <SettingRow k="push" title={t('profile.push')} />
-          <SettingRow k="email" title={t('profile.email')} hint={t('profile.emailHint')} />
-          <SettingRow k="sms" title={t('profile.sms')} hint={t('profile.smsHint')} />
+          </SettingsSection>
         </Card>
       </div>
 

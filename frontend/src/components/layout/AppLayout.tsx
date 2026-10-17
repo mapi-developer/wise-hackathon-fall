@@ -15,7 +15,7 @@ function Gate({ error, onRetry }: { error: string | null; onRetry: () => void })
   return (
     <div className="grid min-h-svh place-content-center justify-items-center gap-5 bg-blush px-4 text-center">
       <span className="grid size-14 place-items-center rounded-2xl bg-forest-950">
-        <LogoMark className="size-9" />
+        <LogoMark className="size-10" />
       </span>
       {error ? (
         <>

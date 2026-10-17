@@ -33,9 +33,13 @@ import type {
   User,
   VisaDecision,
   VisaMap,
-  DestinationAlternatives,
   CountryVisaDetail,
   DataSource,
+  FinanceOverview,
+  JourneyFinances,
+  VisaBasis,
+  VisaRoute,
+  VisaStatus,
 } from './types'
 
 export { ApiError }
@@ -117,6 +121,9 @@ interface ApiPayment {
   id: string
   title: string
   amount_eur: number
+  amount: string | null
+  currency: string | null
+  journey_id: string | null
   status: string
   paid_on: string
 }
@@ -234,7 +241,9 @@ const toPayment = (p: ApiPayment): Payment => ({
   id: p.id,
   date: p.paid_on,
   what: p.title,
-  amount: p.amount_eur,
+  amount: p.amount != null ? Number(p.amount) : p.amount_eur,
+  currency: p.currency || 'EUR',
+  journeyId: p.journey_id ?? undefined,
   status: p.status === 'paid' ? 'paid' : 'upcoming',
 })
 
@@ -514,7 +523,7 @@ interface ApiGuideline {
   processing_days_min?: number | null
   processing_days_max?: number | null
   requirements?: { title: string; description: string; mandatory: boolean }[]
-  fees?: { title: string; amount: string | null; currency: string }[]
+  fees?: { title: string; amount: string | null; currency: string; mandatory?: boolean; note?: string | null }[]
   official_links?: { title: string; url: string }[]
   sources?: { title: string; url: string }[]
 }
@@ -560,7 +569,14 @@ export async function getVisaMap(q: ExploreQuery = {}): Promise<VisaMap> {
 
 export async function getCountryVisa(code: string, q: ExploreQuery = {}): Promise<CountryVisaDetail> {
   const r = await request<
-    ApiProfile & { decision: ApiDecision; guideline: ApiGuideline | null; indicative: { category: string; stay_days: number | null; raw: string } | null; favorite: boolean }
+    ApiProfile & {
+      decision: ApiDecision
+      guideline: ApiGuideline | null
+      indicative: { category: string; stay_days: number | null; raw: string } | null
+      routes: { key: VisaRoute['key']; verified: boolean; stay_days?: number | null; visa_type?: string | null; processing_days_max?: number | null }[]
+      alternatives: { code: string; status: VisaStatus; basis: VisaBasis; stay_days: number | null; distance_km?: number }[]
+      favorite: boolean
+    }
   >(`/api/explore/countries/${code}${exploreQuery(q)}`)
   const g = r.guideline
   return {
@@ -576,50 +592,22 @@ export async function getCountryVisa(code: string, q: ExploreQuery = {}): Promis
           maxStayDays: g.max_stay_days ?? undefined,
           processingDays: g.processing_days_min != null || g.processing_days_max != null ? [g.processing_days_min ?? null, g.processing_days_max ?? null] : undefined,
           requirements: g.requirements ?? [],
-          fees: g.fees ?? [],
+          fees: (g.fees ?? []).map((f) => ({ ...f, mandatory: f.mandatory ?? true })),
           officialLinks: g.official_links ?? [],
           sources: g.sources ?? [],
         }
       : undefined,
+    routes: r.routes.map((x) => ({
+      key: x.key,
+      verified: x.verified,
+      stayDays: x.stay_days ?? undefined,
+      visaType: x.visa_type ?? undefined,
+      processingDaysMax: x.processing_days_max ?? undefined,
+    })),
+    alternatives: r.alternatives.map((a) => ({ code: a.code, status: a.status, basis: a.basis, stayDays: a.stay_days ?? undefined, distanceKm: a.distance_km })),
     indicative: r.indicative ? { category: r.indicative.category, stayDays: r.indicative.stay_days ?? undefined, raw: r.indicative.raw } : undefined,
     source: toSource(r.source),
     favorite: r.favorite,
-  }
-}
-
-interface ApiAlternative {
-  code: string
-  status: VisaDecision['status']
-  basis: VisaDecision['basis']
-  stay_days: number | null
-  has_guideline: boolean
-  lat: number | null
-  lng: number | null
-  distance_km: number | null
-  same_subregion: boolean
-}
-
-/** Easier destinations than `insteadOf` (visa-free first, then nearest), or the easiest overall. */
-export async function getAlternatives(q: ExploreQuery, insteadOf?: string, region?: string): Promise<DestinationAlternatives> {
-  const params = new URLSearchParams(exploreQuery(q).slice(1))
-  if (insteadOf) params.set('instead_of', insteadOf)
-  if (region) params.set('region', region)
-  const r = await request<ApiProfile & { instead_of: ApiDecision | null; alternatives: ApiAlternative[] }>(`/api/explore/alternatives?${params}`)
-  return {
-    ...toTravelProfile(r),
-    insteadOf: r.instead_of ? toDecision(r.instead_of) : undefined,
-    alternatives: r.alternatives.map((a) => ({
-      code: a.code,
-      status: a.status,
-      basis: a.basis,
-      stayDays: a.stay_days ?? undefined,
-      hasGuideline: a.has_guideline,
-      lat: a.lat ?? undefined,
-      lng: a.lng ?? undefined,
-      distanceKm: a.distance_km ?? undefined,
-      sameSubregion: a.same_subregion,
-    })),
-    source: toSource(r.source),
   }
 }
 
@@ -628,3 +616,41 @@ export const listFavorites = () => request<string[]>('/api/explore/favorites')
 export const addFavorite = (code: string) => request<null>('/api/explore/favorites', { method: 'POST', body: { country_code: code } })
 
 export const removeFavorite = (code: string) => request<null>(`/api/explore/favorites/${code}`, { method: 'DELETE' })
+
+/* -------------------------------------------------------------- finances */
+
+export async function getFinances(): Promise<FinanceOverview> {
+  const r = await request<{
+    savings_eur: number
+    monthly_budget_eur: number
+    journeys: (ApiJourneySummary & {
+      origin_code: string
+      guideline: { status: FinanceOverview['journeys'][number]['guideline']['status']; reason: string; verified_at: string | null; processing_days_max: number | null; sources: { title: string; url: string }[] }
+      finances: JourneyFinances
+    })[]
+    totals: FinanceOverview['totals']
+  }>('/api/finances')
+  return {
+    savingsEur: r.savings_eur,
+    monthlyBudgetEur: r.monthly_budget_eur,
+    journeys: r.journeys.map((j) => ({
+      ...toJourneySummary(j),
+      originCode: j.origin_code,
+      guideline: {
+        status: j.guideline.status,
+        reason: j.guideline.reason,
+        verifiedAt: j.guideline.verified_at ?? undefined,
+        processingDaysMax: j.guideline.processing_days_max ?? undefined,
+        sources: j.guideline.sources,
+      },
+      finances: j.finances,
+    })),
+    totals: r.totals,
+  }
+}
+
+/** Which destination / citizenship / purpose combinations have a guideline, and whether each is current. */
+export const getGuidelineCoverage = () =>
+  request<{ destination: string; destination_name: string; origin: string; purpose: TravelPurpose; visa_type: string; status: 'current' | 'stale' | 'missing'; reason: string }[]>(
+    '/api/guidelines/coverage',
+  )

@@ -472,14 +472,14 @@ export function Chat({
     <Card className="flex min-h-[560px] flex-col overflow-hidden lg:h-[calc(100svh-76px-4rem)]">
       <div className="flex items-center gap-3 border-b border-rose-200 px-5 py-4 sm:px-6">
         <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-forest-950">
-          <LogoMark className="size-7" />
+          <LogoMark className="size-8" />
         </span>
         <div className="min-w-0 flex-1">
           <p className="font-semibold">{t('chat.title')}</p>
           <JourneySwitcher journeys={journeys} value={chatJourney} disabled={busy} onPick={switchJourney} onNew={startNewJourney} />
         </div>
         <Link
-          to="/app/explore?alternatives=any"
+          to="/app/explore"
           className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-semibold text-muted hover:bg-rose-100 hover:text-forest-950"
         >
           <MapIcon className="size-4" aria-hidden /> <span className="hidden sm:inline">{t('chat.whereCanIGo')}</span>

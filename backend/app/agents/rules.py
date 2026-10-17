@@ -260,7 +260,7 @@ def sum_fees(fees: Iterable[dict[str, Any]]) -> dict[str, Any]:
     items, unknown = [], []
     for f in fees:
         amt = money(f.get("amount"))
-        entry = {"title": f["title"], "amount": str(amt) if amt is not None else None, "currency": f.get("currency"), "mandatory": f.get("mandatory", True), "note": f.get("note")}
+        entry = {"key": f.get("key"), "title": f["title"], "amount": str(amt) if amt is not None else None, "currency": f.get("currency"), "mandatory": f.get("mandatory", True), "note": f.get("note")}
         items.append(entry)
         if amt is None or not f.get("currency"):
             unknown.append(f["title"])

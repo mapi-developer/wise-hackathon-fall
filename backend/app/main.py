@@ -322,6 +322,11 @@ async def create_payment(payload: PaymentCreate, user: User = Depends(get_curren
     return payment
 
 
+@app.get("/api/finances")
+async def finances_overview(user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    return await journey_svc.overview(session, user)
+
+
 # --- NOTIFICATIONS ---
 
 @app.get("/api/notifications", response_model=List[Notification])
@@ -650,28 +655,6 @@ CODE = r"^[A-Z]{2}$"
 PURPOSE = r"^(tourism|study|work|job_search|family)$"
 
 
-async def travel_profile(session: AsyncSession, user: User, origin: Optional[str], residence: Optional[str], purpose: Optional[str]) -> dict:
-    """Passport, residence and purpose: the query overrides the profile; an empty profile falls back to the analysed passport."""
-    source = "chosen" if origin else "none"
-    if not origin and user.nationality_code:
-        origin, source = user.nationality_code, "profile"
-    if not origin:
-        analyses = (await session.exec(
-            select(DocumentAnalysis)
-            .where(DocumentAnalysis.user_id == user.id, DocumentAnalysis.status == "done", DocumentAnalysis.document_kind == "passport")
-            .order_by(DocumentAnalysis.analyzed_at.desc())
-        )).all()
-        for a in analyses:
-            if code := explore.alpha2(a.normalized.get("nationality")):
-                origin, source = code, "passport"
-                break
-    if not origin and (code := explore.alpha2(user.citizenship)):
-        origin, source = code, "citizenship"
-    # residence="" in the query means "no residence permit" even if the profile has one.
-    residence = user.residence_code if residence is None else residence
-    return {"origin": origin, "origin_source": source, "residence": residence or None, "purpose": purpose or user.travel_purpose or "tourism"}
-
-
 @app.get("/api/explore/map")
 async def explore_map(
     origin: Optional[str] = Query(None, pattern=CODE),
@@ -680,28 +663,10 @@ async def explore_map(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    profile = await travel_profile(session, user, origin, residence, purpose)
-    countries = await explore.decisions(session, profile["origin"], profile["residence"], profile["purpose"])
+    profile = await explore.travel_profile(session, user, origin, residence, purpose)
+    decisions = await explore.decide_all(session, profile)
+    countries = [d.as_dict() for d in decisions.values()]
     return {**profile, "source": visa_matrix.SOURCE, "passports": await visa_matrix.passports(session), "countries": countries}
-
-
-@app.get("/api/explore/alternatives")
-async def explore_alternatives(
-    instead_of: Optional[str] = Query(None, pattern=CODE, description="Destination the user can't easily go to"),
-    region: Optional[str] = Query(None, pattern=r"^(Africa|Americas|Asia|Europe|Oceania)$"),
-    origin: Optional[str] = Query(None, pattern=CODE),
-    residence: Optional[str] = Query(None, pattern=r"^([A-Z]{2})?$"),
-    purpose: Optional[str] = Query(None, pattern=PURPOSE),
-    limit: int = Query(8, ge=1, le=30),
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    """Easier destinations than `instead_of` (visa-free first, then nearest), or the easiest overall."""
-    profile = await travel_profile(session, user, origin, residence, purpose)
-    rows = await explore.decisions(session, profile["origin"], profile["residence"], profile["purpose"])
-    target = next((r for r in rows if r["code"] == instead_of), None) if instead_of else None
-    found = explore.alternatives(rows, instead_of, profile["origin"], region, limit=limit)
-    return {**profile, "instead_of": target, "alternatives": found, "source": visa_matrix.SOURCE}
 
 
 @app.get("/api/explore/countries/{code}")
@@ -714,19 +679,23 @@ async def explore_country(
     session: AsyncSession = Depends(get_session),
 ):
     code = code.upper()
-    profile = await travel_profile(session, user, origin, residence, purpose)
+    profile = await explore.travel_profile(session, user, origin, residence, purpose)
     o = profile["origin"]
+    decisions = await explore.decide_all(session, profile)
+    d = decisions.get(code) or explore.decide(code, o, profile["residence"], profile["purpose"], None, None, False)
     matrix = (await visa_matrix.for_origin(session, o)).get(code) if o else None
     rows = (await session.exec(select(CountryGuideline).where(CountryGuideline.destination_code == code))).all()
     g = explore.pick_guideline(list(rows), code, o, profile["purpose"])
-    current = bool(g) and guideline_store.freshness(g)[0] == "current"
-    d = explore.decide(code, o, profile["residence"], profile["purpose"], matrix, g, current)
+    guideline = explore.guideline_detail(g) if g else None
     favorite = (await session.exec(select(FavoriteDestination).where(FavoriteDestination.user_id == user.id, FavoriteDestination.country_code == code))).first()
     return {
         **profile,
         "decision": d.as_dict(),
-        "guideline": explore.guideline_detail(g) if g else None,
+        "guideline": guideline,
         "indicative": {"category": matrix.category, "stay_days": matrix.stay_days, "raw": matrix.raw} if matrix else None,
+        "routes": explore.routes(code, profile, d, guideline),
+        # Only worth showing when getting in takes more than a passport; visa-free ones first.
+        "alternatives": explore.alternatives(code, decisions) if o and d.status in ("visa_required", "unknown", "evisa", "visa_on_arrival") else [],
         "source": visa_matrix.SOURCE,
         "favorite": favorite is not None,
     }

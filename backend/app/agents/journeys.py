@@ -133,6 +133,9 @@ def _money_sum(amounts: list[tuple[str, str]]) -> dict[str, str]:
 
 def finances(j: Journey, g: Optional[CountryGuideline], user: User, payments: list[Payment]) -> dict[str, Any]:
     fees = rules.sum_fees(g.fees) if g else {"items": [], "mandatory_totals": {}, "amounts_not_fixed": []}
+    paid_keys = {p.fee_key for p in payments if p.fee_key}
+    for item in fees["items"]:
+        item["paid"] = item["key"] in paid_keys
     paid = _money_sum([(p.amount or str(p.amount_eur), p.currency or "EUR") for p in payments])
     remaining = {}
     for cur, total in fees["mandatory_totals"].items():
@@ -259,6 +262,35 @@ async def view(session: AsyncSession, user: User, j: Journey) -> dict[str, Any]:
         "chats": [{"id": c.id, "title": c.title, "updated_at": c.updated_at, "created_here": c.id == j.chat_id} for c in chats],
         "parent": {"id": parent.id, "title": parent.title} if parent else None,
         "continuations": [{"id": c.id, "title": c.title, "status": c.status} for c in children],
+    }
+
+
+async def overview(session: AsyncSession, user: User) -> dict[str, Any]:
+    """Money across the user's open journeys, exact and per currency (never converted)."""
+    js = (await session.exec(select(Journey).where(Journey.user_id == user.id, Journey.status != "archived")
+                             .order_by(Journey.travel_date.is_(None), Journey.travel_date, Journey.updated_at.desc()))).all()
+    payments = (await session.exec(select(Payment).where(Payment.user_id == user.id))).all()
+    out, due, remaining = [], [], []
+    for j in js:
+        g = await session.get(CountryGuideline, j.guideline_id) if j.guideline_id else None
+        status, reason = guidelines.freshness(g) if g else ("missing", "no guideline")
+        f = finances(j, g, user, [p for p in payments if p.journey_id == j.id])
+        due += list(f["fees"]["mandatory_totals"].items())
+        remaining += list(f["remaining"].items())
+        out.append({
+            **await summary(session, j), "origin_code": j.origin_code,
+            "guideline": {"status": status, "reason": reason, "verified_at": g.verified_at if g else None,
+                          "processing_days_max": g.processing_days_max if g else None, "sources": g.sources if g else []},
+            "finances": f,
+        })
+    return {
+        "savings_eur": user.savings_eur, "monthly_budget_eur": user.monthly_budget_eur,
+        "journeys": out,
+        "totals": {
+            "due": _money_sum([(a, c) for c, a in due]),
+            "paid": _money_sum([(p.amount or str(p.amount_eur), p.currency or "EUR") for p in payments if p.status == "paid"]),
+            "remaining": _money_sum([(a, c) for c, a in remaining]),
+        },
     }
 
 

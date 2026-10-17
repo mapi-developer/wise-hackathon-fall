@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, useNavigate } from 'react-router'
-import { Bell, Globe2, Menu, Search } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { NavLink } from 'react-router'
+import { Bell, Globe2, Menu } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { useCase } from '@/store/context'
-import { destinations } from '@/lib/mock-data'
 import { cn } from '@/lib/format'
+import { GlobalSearch } from './GlobalSearch'
 import { LanguageMenu } from './LanguageMenu'
 import { NotificationsPanel } from './NotificationsPanel'
 
@@ -20,71 +20,6 @@ function useClickAway(ref: React.RefObject<HTMLElement | null>, onAway: () => vo
       document.removeEventListener('keydown', key)
     }
   }, [ref, onAway, active])
-}
-
-function GlobalSearch() {
-  const { tasks, documents } = useCase()
-  const { t, country } = useI18n()
-  const navigate = useNavigate()
-  const [q, setQ] = useState('')
-  const [open, setOpen] = useState(false)
-  const wrap = useRef<HTMLDivElement>(null)
-  useClickAway(wrap, () => setOpen(false), open)
-
-  const results = useMemo(() => {
-    const term = q.trim().toLowerCase()
-    if (!term) return []
-    const hit = (s: string) => s.toLowerCase().includes(term)
-    return [
-      ...tasks.filter((x) => hit(x.title)).map((x) => ({ group: t('search.tasks'), label: x.title, to: '/app/todo' })),
-      ...documents.filter((d) => hit(d.title) || hit(d.fileName)).map((d) => ({ group: t('search.documents'), label: d.title, to: '/app/documents' })),
-      ...destinations.filter((c) => hit(country(c.code))).map((c) => ({ group: t('search.countries'), label: country(c.code), to: '/app/finances' })),
-    ].slice(0, 8)
-  }, [q, tasks, documents, t, country])
-
-  const go = (to: string) => {
-    navigate(to)
-    setOpen(false)
-    setQ('')
-  }
-
-  return (
-    <div ref={wrap} className="relative w-full max-w-[432px]">
-      <Search className="pointer-events-none absolute top-1/2 left-4 size-[18px] -translate-y-1/2 text-forest-950" aria-hidden />
-      <input
-        type="search"
-        value={q}
-        onChange={(e) => {
-          setQ(e.target.value)
-          setOpen(true)
-        }}
-        onFocus={() => setOpen(true)}
-        onKeyDown={(e) => e.key === 'Enter' && results[0] && go(results[0].to)}
-        placeholder={t('search.placeholder')}
-        aria-label={t('search.aria')}
-        className="h-[42px] w-full rounded-xl border border-rose-300 bg-white pr-4 pl-11 text-[15px] placeholder:text-muted outline-none focus:border-forest-950 focus-visible:outline-none"
-      />
-      {open && q.trim() && (
-        <div className="animate-pop-in absolute top-[calc(100%+8px)] z-40 w-full overflow-hidden rounded-2xl border border-rose-200 bg-white py-2 shadow-[0_24px_60px_-20px_rgb(3_16_10/0.35)]">
-          {results.length === 0 ? (
-            <p className="px-4 py-3 text-sm text-muted">{t('search.empty', { q })}</p>
-          ) : (
-            results.map((r, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => go(r.to)}
-                className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm hover:bg-blush"
-              >
-                <span className="truncate font-medium">{r.label}</span>
-                <span className="shrink-0 text-xs text-muted">{r.group}</span>
-              </button>
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  )
 }
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {

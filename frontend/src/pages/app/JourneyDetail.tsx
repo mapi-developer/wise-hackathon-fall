@@ -9,19 +9,15 @@ import { Dialog } from '@/components/ui/Dialog'
 import { Card, CardTitle, Checkbox, Input, PageHeader, Progress } from '@/components/ui/primitives'
 import { PayDialog, UploadDialog } from '@/components/case/DocumentDialogs'
 import * as api from '@/lib/api'
-import { cn, relativeDays, shortDate } from '@/lib/format'
+import { cn, exactMoney, moneyTotals, relativeDays, shortDate } from '@/lib/format'
 import { documentCategories, type AutomationAction, type DocumentCategory, type JourneyDetail, type JourneyStatus } from '@/lib/types'
 import { useCase, useToast } from '@/store/context'
 import { useI18n } from '@/i18n'
-import { currentLocale, translate } from '@/i18n/core'
+import { translate } from '@/i18n/core'
 import { purposeLabel, statusMeta } from '@/components/case/journey-meta'
 
-const fmt = (amount: string, currency: string) =>
-  new Intl.NumberFormat(currentLocale(), { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(amount))
-const totals = (t: Record<string, string>) => {
-  const e = Object.entries(t)
-  return e.length ? e.map(([c, a]) => fmt(a, c)).join(' + ') : '—'
-}
+const fmt = exactMoney
+const totals = (t: Record<string, string>) => moneyTotals(t)
 const day = (iso?: string) => (iso ? shortDate(iso.slice(0, 10), { day: 'numeric', month: 'short', year: 'numeric' }) : '')
 
 const reqIcon = { satisfied: Check, problem: CircleAlert, missing: Circle } as const

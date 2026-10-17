@@ -19,7 +19,6 @@ from app import explore
 from app.agents import guidelines, journeys, rules
 from app.forms.templates import pdf_spec
 from app.models import ChatSession, CountryGuideline, Document, DocumentAnalysis, Journey, Task, User, utcnow
-from app.services import visa_matrix
 
 Purpose = Literal["tourism", "study", "work", "job_search", "family"]
 
@@ -105,20 +104,6 @@ class JourneyFocus(In):
     journey_id: Optional[str] = Field(description="id of the journey to work on from now on, or null for none (general questions)")
 
 
-class DestinationSearch(In):
-    origin_code: str = Field(description="ISO alpha-2 code of the passport the user travels on")
-    purpose: Purpose
-    instead_of: Optional[str] = Field(default=None, description="ISO alpha-2 code of a destination the user can't (easily) go to; null to find the easiest destinations overall")
-    region: Optional[Literal["Africa", "Americas", "Asia", "Europe", "Oceania"]] = None
-    residence_code: Optional[str] = Field(default=None, description="ISO alpha-2 code of a country where the user holds a residence permit, or null")
-    limit: int = Field(default=8, ge=1, le=20)
-
-    @field_validator("origin_code", "instead_of", "residence_code")
-    @classmethod
-    def _codes(cls, v):
-        return None if v is None else _iso2(v)
-
-
 class JourneyUpdate(In):
     journey_id: str
     status: Optional[Literal["planning", "active", "completed", "archived"]] = None
@@ -142,6 +127,15 @@ class PrefillInput(In):
 
 class NoInput(In):
     pass
+
+
+class DestinationSearch(In):
+    near_code: Optional[str] = Field(default=None, description="ISO alpha-2 of a country the user wanted but may not easily enter; "
+                                     "alternatives are ranked near it. Null for the easiest destinations anywhere.")
+    region: Optional[Literal["Africa", "Americas", "Asia", "Europe", "Oceania"]] = Field(default=None, description="Limit to one region, or null")
+    purpose: Optional[Purpose] = Field(default=None, description="Null for the purpose saved on the user's profile")
+
+    _iso = field_validator("near_code")(classmethod(lambda cls, v: _iso2(v) if v else None))
 
 
 class ProfileInput(In):
@@ -226,11 +220,6 @@ def _compact(view: dict) -> dict:
         "next_steps": [st["title"] for st in view["steps"] if not st["done"]][:2],
         "processing_days_max": view["guideline"]["processing_days_max"],
     })
-
-
-def _explore_url(code: Optional[str] = None, alternatives: Optional[str] = None, origin: Optional[str] = None, purpose: Optional[str] = None) -> str:
-    params = [f"{k}={v}" for k, v in (("country", code), ("alternatives", alternatives), ("origin", origin), ("purpose", purpose)) if v]
-    return "/app/explore" + ("?" + "&".join(params) if params else "")
 
 
 def _guideline_view(g: CountryGuideline) -> dict[str, Any]:
@@ -365,25 +354,6 @@ async def switch_journey(session, user: User, inp: JourneyFocus, ctx: Context):
             "_ui": [_ui("journey", j.id, j.title)]}
 
 
-async def suggest_destinations(session, user: User, inp: DestinationSearch, ctx: Context):
-    rows = await explore.decisions(session, inp.origin_code, inp.residence_code, inp.purpose)
-    target = next((r for r in rows if r["code"] == inp.instead_of), None) if inp.instead_of else None
-    found = explore.alternatives(rows, inp.instead_of, inp.origin_code, inp.region, limit=inp.limit)
-    for a in found:
-        a["map_url"] = _explore_url(a["code"], origin=inp.origin_code, purpose=inp.purpose)
-        for k in ("lat", "lng", "region"):
-            a.pop(k)
-    return {
-        "status": "current",
-        "instead_of": target and {k: target[k] for k in ("code", "status", "basis", "stay_days")},
-        "alternatives": found,
-        "map_url": _explore_url(alternatives=inp.instead_of or "any", origin=inp.origin_code, purpose=inp.purpose),
-        "note": "Ranked easiest entry first (visa_free, visa_on_arrival, evisa), then verified before indicative, then nearest. "
-                "basis 'indicative' comes from the open " + visa_matrix.SOURCE["title"] + " (as of " + visa_matrix.SOURCE["as_of"] + "), "
-                "short tourist visits only and not checked by Unbound: say so. Only destinations with has_guideline true can become a "
-                "journey right away. Link map_url so the user can see the options on the map.",
-    }
-
 
 async def get_journey(session, user: User, inp: JourneyRef, ctx: Context):
     j = await _own_journey(session, user, inp.journey_id)
@@ -444,6 +414,40 @@ async def prefill_form(session, user: User, inp: PrefillInput, ctx: Context):
     }
 
 
+def _country_name(code: str) -> str:
+    c = explore.pycountry.countries.get(alpha_2=code)
+    return getattr(c, "common_name", None) or (c.name if c else code)
+
+
+async def find_destinations(session, user: User, inp: DestinationSearch, ctx: Context):
+    profile = await explore.travel_profile(session, user, None, None, inp.purpose)
+    if not profile["origin"]:
+        return {"status": "no_passport", "message": "The user's passport country is unknown. Ask which passport they travel on, "
+                                                    "or suggest setting it on the map (/app/explore)."}
+    decisions = await explore.decide_all(session, profile)
+
+    def view(o: dict) -> dict:
+        return {**o, "name": _country_name(o["code"]), "map_url": f"/app/explore?country={o['code']}",
+                "verified": o["basis"] in ("rule", "verified")}
+
+    out: dict[str, Any] = {"status": "ok", "passport": profile["origin"], "residence": profile["residence"], "purpose": profile["purpose"]}
+    if inp.near_code:
+        target = decisions.get(inp.near_code)
+        out["requested"] = view({"code": inp.near_code, "status": target.status if target else "unknown",
+                                 "basis": target.basis if target else "none", "stay_days": target.stay_days if target else None})
+        if target:
+            g_rows = (await session.exec(select(CountryGuideline).where(CountryGuideline.destination_code == inp.near_code))).all()
+            g = explore.pick_guideline(list(g_rows), inp.near_code, profile["origin"], profile["purpose"])
+            out["routes"] = explore.routes(inp.near_code, profile, target, explore.guideline_detail(g) if g else None)
+        out["alternatives"] = [view(o) for o in explore.alternatives(inp.near_code, decisions)]
+    else:
+        out["destinations"] = [view(o) for o in explore.easiest(decisions, inp.region)]
+    out["note"] = ("Ranked visa-free first, then visa on arrival, then eVisa. Entries with verified=false come from the open Passport "
+                   "Index dataset (as of " + explore.visa_matrix.SOURCE["as_of"] + ") and are indicative: say so, and say to confirm "
+                   "with the official source or get_country_guidelines before travelling. Link each country with its map_url.")
+    return _jsonable(out)
+
+
 async def update_my_profile(session, user: User, inp: ProfileInput, ctx: Context):
     changed = {k: v.strip() for k, v in inp.model_dump(exclude_none=True).items() if v and v.strip()}
     for k, v in changed.items():
@@ -490,11 +494,6 @@ TOOLS: dict[str, tuple[type[In], Handler, str, str, tuple[str, ...]]] = {
         "Make this conversation work on another of the user's journeys (or none, with null). Returns that journey like get_journey. "
         "Use it when the user turns to a different journey than the current one.",
         "Switching journey", ("chats",)),
-    "suggest_destinations": (DestinationSearch, suggest_destinations,
-        "Destinations that are easier to enter than one the user can't go to (instead_of), or the easiest overall: visa-free first, "
-        "then visa on arrival and e-visa, nearest first. Use when a destination needs a visa the user can't get, isn't supported yet, "
-        "or the user asks where they could go. Returns map links.",
-        "Finding easier destinations", ()),
     "get_journey": (JourneyRef, get_journey,
         "A journey with its pathway steps (ids, done or not), documents needed, finances and automation options.",
         "Opening your journey", ()),
@@ -509,6 +508,11 @@ TOOLS: dict[str, tuple[type[In], Handler, str, str, tuple[str, ...]]] = {
         "Prefill an application form for a journey from the user's profile, analysed passport and journey dates. "
         "Returns a link and the fields the user still has to complete.",
         "Prefilling the form", ("forms", "journeys")),
+    "find_destinations": (DestinationSearch, find_destinations,
+        "Where the user can go easily on their passport (and residence permit): visa-free first, then visa on arrival, then eVisa. "
+        "With near_code: ways into that country and easier alternatives near it. Use when the user can't easily enter a "
+        "country, asks for options or ideas, or asks where they can travel.",
+        "Finding destinations for you", ()),
     "update_my_profile": (ProfileInput, update_my_profile,
         "Save details the user told you about themselves (citizenship, address, status, studies or occupation).",
         "Saving to your profile", ("profile",)),

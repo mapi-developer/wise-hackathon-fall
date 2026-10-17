@@ -58,3 +58,16 @@ export function timeAgo(iso: string, now = new Date()) {
   if (days < 7) return d.toLocaleDateString(locale, { weekday: 'short' })
   return d.toLocaleDateString(locale, { day: 'numeric', month: 'short' })
 }
+
+/** Opens a new assistant conversation with `prompt` in the message box (see pages/app/Assistant). */
+export const assistantUrl = (prompt: string) => `/app?new=${Date.now()}&prompt=${encodeURIComponent(prompt)}`
+
+/** An exact amount in its own currency, e.g. "€90" or "€67.50". Never converted. */
+export const exactMoney = (amount: string | number, currency: string) =>
+  new Intl.NumberFormat(currentLocale(), { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(amount))
+
+/** Per-currency totals as "€90 + 12,000 HUF"; currencies are never added together. */
+export const moneyTotals = (totals: Record<string, string>, empty = '—') => {
+  const e = Object.entries(totals)
+  return e.length ? e.map(([c, a]) => exactMoney(a, c)).join(' + ') : empty
+}

@@ -106,7 +106,10 @@ export interface Payment {
   id: string
   date: string
   what: string
+  /** In `currency`; exact for journey fees (the server keeps a decimal string). */
   amount: number
+  currency: string
+  journeyId?: string
   status: 'upcoming' | 'paid'
 }
 
@@ -199,7 +202,7 @@ export interface AutomationAction {
 
 /** Every amount is a decimal string computed by the backend rules, per currency. */
 export interface JourneyFinances {
-  fees: { items: { title: string; amount: string | null; currency: string; mandatory: boolean; note?: string | null }[]; mandatory_totals: Record<string, string>; amounts_not_fixed: string[] }
+  fees: { items: { key: string | null; title: string; amount: string | null; currency: string; mandatory: boolean; note?: string | null; paid?: boolean }[]; mandatory_totals: Record<string, string>; amounts_not_fixed: string[] }
   paid: Record<string, string>
   remaining: Record<string, string>
   proof_of_funds: { requirement: string; required: string; currency: string; savings_eur: string; covered: boolean | null; short_by: string | null } | null
@@ -354,35 +357,49 @@ export interface CountryGuidelineDetail {
   maxStayDays?: number
   processingDays?: [number | null, number | null]
   requirements: { title: string; description: string; mandatory: boolean }[]
-  fees: { title: string; amount: string | null; currency: string }[]
+  fees: { title: string; amount: string | null; currency: string; mandatory: boolean; note?: string | null }[]
   officialLinks: { title: string; url: string }[]
   sources: { title: string; url: string }[]
 }
 
-/** A destination that is easier to enter than the one the user can't go to (backend/app/explore.py). */
-export interface DestinationAlternative {
+/** One way into a country for this traveller; translated as explore.route.<key>. */
+export interface VisaRoute {
+  key: 'visa_free' | 'on_arrival' | 'evisa' | 'eta' | 'apply_visa' | 'purpose_visa' | 'schengen_permit'
+  verified: boolean
+  stayDays?: number
+  visaType?: string
+  processingDaysMax?: number
+}
+
+/** An easier destination, ranked visa-free first, then nearer. */
+export interface VisaAlternative {
   code: string
   status: VisaStatus
   basis: VisaBasis
   stayDays?: number
-  hasGuideline: boolean
-  lat?: number
-  lng?: number
   distanceKm?: number
-  sameSubregion: boolean
-}
-
-export interface DestinationAlternatives extends TravelProfile {
-  /** The blocked destination, when looking for alternatives to one. */
-  insteadOf?: VisaDecision
-  alternatives: DestinationAlternative[]
-  source: DataSource
 }
 
 export interface CountryVisaDetail extends TravelProfile {
   decision: VisaDecision
+  routes: VisaRoute[]
+  alternatives: VisaAlternative[]
   guideline?: CountryGuidelineDetail
   indicative?: { category: string; stayDays?: number; raw: string }
   source: DataSource
   favorite: boolean
+}
+
+/* --------------------------------------------------------------- finances */
+
+/** Money across open journeys. Amounts are exact decimal strings, per currency, never converted. */
+export interface FinanceOverview {
+  savingsEur: number
+  monthlyBudgetEur: number
+  journeys: (JourneySummary & {
+    originCode: string
+    guideline: { status: 'current' | 'stale' | 'missing'; reason: string; verifiedAt?: string; processingDaysMax?: number; sources: { title: string; url: string }[] }
+    finances: JourneyFinances
+  })[]
+  totals: { due: Record<string, string>; paid: Record<string, string>; remaining: Record<string, string> }
 }

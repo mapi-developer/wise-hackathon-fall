@@ -669,6 +669,35 @@ async def explore_map(
     return {**profile, "source": visa_matrix.SOURCE, "passports": await visa_matrix.passports(session), "countries": countries}
 
 
+@app.get("/api/explore/alternatives")
+async def explore_alternatives(
+    instead_of: Optional[str] = Query(None, pattern=CODE, description="Destination the user can't easily go to"),
+    region: Optional[str] = Query(None, pattern=r"^(Africa|Americas|Asia|Europe|Oceania)$"),
+    origin: Optional[str] = Query(None, pattern=CODE),
+    residence: Optional[str] = Query(None, pattern=r"^([A-Z]{2})?$"),
+    purpose: Optional[str] = Query(None, pattern=PURPOSE),
+    limit: int = Query(8, ge=1, le=30),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """"Where can I go?": easier destinations near `instead_of`, or the easiest overall (visa-free first)."""
+    profile = await explore.travel_profile(session, user, origin, residence, purpose)
+    decisions = await explore.decide_all(session, profile)
+    target = decisions.get(instead_of) if instead_of else None
+    found = explore.alternatives(instead_of, decisions, limit) if instead_of else explore.easiest(decisions, region, limit)
+    places = explore.geo()
+    near = places.get(instead_of or profile["origin"] or "")
+    out = []
+    for a in found:
+        g = places.get(a["code"], {})
+        out.append({
+            **a, "has_guideline": decisions[a["code"]].has_guideline, "lat": g.get("lat"), "lng": g.get("lng"),
+            "distance_km": a.get("distance_km", explore.distance_km(near, g) if near and g else None),
+            "same_subregion": bool(instead_of and near and g.get("subregion") == near.get("subregion")),
+        })
+    return {**profile, "instead_of": target.as_dict() if target else None, "alternatives": out, "source": visa_matrix.SOURCE}
+
+
 @app.get("/api/explore/countries/{code}")
 async def explore_country(
     code: str,

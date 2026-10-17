@@ -380,6 +380,26 @@ export interface VisaAlternative {
   distanceKm?: number
 }
 
+/** A destination that is easier to enter than the one the user can't go to (backend/app/explore.py). */
+export interface DestinationAlternative {
+  code: string
+  status: VisaStatus
+  basis: VisaBasis
+  stayDays?: number
+  hasGuideline: boolean
+  lat?: number
+  lng?: number
+  distanceKm?: number
+  sameSubregion: boolean
+}
+
+export interface DestinationAlternatives extends TravelProfile {
+  /** The blocked destination, when looking for alternatives to one. */
+  insteadOf?: VisaDecision
+  alternatives: DestinationAlternative[]
+  source: DataSource
+}
+
 export interface CountryVisaDetail extends TravelProfile {
   decision: VisaDecision
   routes: VisaRoute[]

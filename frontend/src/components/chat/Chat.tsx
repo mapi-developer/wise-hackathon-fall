@@ -479,7 +479,7 @@ export function Chat({
           <JourneySwitcher journeys={journeys} value={chatJourney} disabled={busy} onPick={switchJourney} onNew={startNewJourney} />
         </div>
         <Link
-          to="/app/explore"
+          to="/app/explore?alternatives=any"
           className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-semibold text-muted hover:bg-rose-100 hover:text-forest-950"
         >
           <MapIcon className="size-4" aria-hidden /> <span className="hidden sm:inline">{t('chat.whereCanIGo')}</span>

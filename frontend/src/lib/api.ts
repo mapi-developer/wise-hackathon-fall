@@ -33,6 +33,7 @@ import type {
   User,
   VisaDecision,
   VisaMap,
+  DestinationAlternatives,
   CountryVisaDetail,
   DataSource,
   FinanceOverview,
@@ -608,6 +609,42 @@ export async function getCountryVisa(code: string, q: ExploreQuery = {}): Promis
     indicative: r.indicative ? { category: r.indicative.category, stayDays: r.indicative.stay_days ?? undefined, raw: r.indicative.raw } : undefined,
     source: toSource(r.source),
     favorite: r.favorite,
+  }
+}
+
+interface ApiAlternative {
+  code: string
+  status: VisaDecision['status']
+  basis: VisaDecision['basis']
+  stay_days: number | null
+  has_guideline: boolean
+  lat: number | null
+  lng: number | null
+  distance_km: number | null
+  same_subregion: boolean
+}
+
+/** Easier destinations than `insteadOf` (visa-free first, then nearest), or the easiest overall. */
+export async function getAlternatives(q: ExploreQuery, insteadOf?: string, region?: string): Promise<DestinationAlternatives> {
+  const params = new URLSearchParams(exploreQuery(q).slice(1))
+  if (insteadOf) params.set('instead_of', insteadOf)
+  if (region) params.set('region', region)
+  const r = await request<ApiProfile & { instead_of: ApiDecision | null; alternatives: ApiAlternative[] }>(`/api/explore/alternatives?${params}`)
+  return {
+    ...toTravelProfile(r),
+    insteadOf: r.instead_of ? toDecision(r.instead_of) : undefined,
+    alternatives: r.alternatives.map((a) => ({
+      code: a.code,
+      status: a.status,
+      basis: a.basis,
+      stayDays: a.stay_days ?? undefined,
+      hasGuideline: a.has_guideline,
+      lat: a.lat ?? undefined,
+      lng: a.lng ?? undefined,
+      distanceKm: a.distance_km ?? undefined,
+      sameSubregion: a.same_subregion,
+    })),
+    source: toSource(r.source),
   }
 }
 

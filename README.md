@@ -4,7 +4,7 @@
 
 > **Breaking down borders, one journey at a time.** 
 
-![](LiveDemo.mp4)
+[![](LiveDemo.mp4)](https://github.com/user-attachments/assets/57f2f38d-c99a-48f9-a306-032ad1727833)
 
 > Unbound is a visionary, AI-driven platform designed to simplify global mobility. Whether you are navigating complex visa matrices, exploring relocation opportunities, or managing immigration documents, Unbound acts as your intelligent co-pilot, turning the daunting process of global relocation into a seamless, empowering experience.
 

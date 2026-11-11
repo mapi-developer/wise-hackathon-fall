@@ -1,4 +1,4 @@
-# 🌍 Unbound: Your AI-Powered Global Journey Companion
+# 🌍 Unbound: Your AI-Powered Global Journey Companiion
 
 
 
